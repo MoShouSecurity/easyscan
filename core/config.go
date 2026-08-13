@@ -26,6 +26,10 @@ type ScanOptions struct {
 	ScreenshotDir string `json:"screenshot_dir"`
 	// ChromePath 截图用 Chrome 可执行文件路径（空则自动探测）。
 	ChromePath string `json:"chrome_path"`
+	// NmapPath nmap 可执行文件路径（空则自动探测）。
+	NmapPath string `json:"nmap_path"`
+	// MasscanPath masscan 可执行文件路径（空则自动探测）。
+	MasscanPath string `json:"masscan_path"`
 	// LeakDictPath 文件泄漏自定义字典文件（空则用内置字典）。
 	LeakDictPath string `json:"leak_dict_path"`
 	// NucleiTemplatesDir 自定义 nuclei 模板目录（空则用内置模板）。
@@ -67,6 +71,8 @@ type ScanConfig struct {
 	Concurrency     int    `yaml:"concurrency" json:"concurrency"`
 	TimeoutSec      int    `yaml:"timeout_sec" json:"timeout_sec"`
 	DefaultPortMode string `yaml:"default_port_mode" json:"default_port_mode"`
+	NmapPath        string `yaml:"nmap_path" json:"nmap_path"`     // nmap 路径，空则自动探测
+	MasscanPath     string `yaml:"masscan_path" json:"masscan_path"` // masscan 路径，空则自动探测
 }
 
 // FileLeakConfig 文件泄漏检测配置。
@@ -155,5 +161,7 @@ func (c Config) ToOptions() ScanOptions {
 	opts.NucleiTemplatesDir = c.Nuclei.TemplatesDir
 	opts.ProviderConfigPath = c.Subfinder.ProviderConfig
 	opts.ChromePath = c.Screenshot.ChromePath
+	opts.NmapPath = c.Scan.NmapPath
+	opts.MasscanPath = c.Scan.MasscanPath
 	return opts
 }

@@ -136,7 +136,7 @@ func (e *Engine) ScanIPs(ctx context.Context, target string, taskID string, prog
 // 优先用 nmap（-sn 存活确认 + -sV 服务/版本识别），不可用/失败时降级纯 Go 扫描。
 func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, ipHosts map[string][]string, taskID string, report ProgressFunc, base int, span int) []Site {
 	siteMap := map[string]Site{}
-	nmap := NewNmapScanner()
+	nmap := NewNmapScanner(e.opts.NmapPath)
 
 	// 1. IP 存活确认（nmap -sn 综合 ICMP/TCP/ARP 探测；目标禁 ping 时跳过直接扫描）。
 	alive := ips

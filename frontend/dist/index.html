@@ -165,6 +165,20 @@
         </div>
       </div>
     </div>
+    <div class="row">
+      <div><label>nmap 路径</label>
+        <div style="display:flex;gap:6px">
+          <input type="text" id="cfgNmap" placeholder="留空自动探测" style="flex:1" />
+          <button class="ghost" style="padding:7px 10px" onclick="detectNmap()">探测</button>
+        </div>
+      </div>
+      <div><label>masscan 路径</label>
+        <div style="display:flex;gap:6px">
+          <input type="text" id="cfgMasscan" placeholder="留空自动探测" style="flex:1" />
+          <button class="ghost" style="padding:7px 10px" onclick="detectMasscan()">探测</button>
+        </div>
+      </div>
+    </div>
     <label>HTTP 代理（如 http://127.0.0.1:7890）</label>
     <input type="text" id="cfgProxy" placeholder="留空则不使用代理" />
     <div style="margin-top:12px;color:var(--muted);font-size:11px;word-break:break-all">配置文件：<span id="cfgPath"></span></div>
@@ -413,6 +427,8 @@ async function openConfig() {
     document.getElementById('cfgTimeout').value = (cfg.scan && cfg.scan.timeout_sec) || 5;
     document.getElementById('cfgPortMode').value = (cfg.scan && cfg.scan.default_port_mode) || 'top1000';
     document.getElementById('cfgChrome').value = (cfg.screenshot && cfg.screenshot.chrome_path) || '';
+    document.getElementById('cfgNmap').value = (cfg.scan && cfg.scan.nmap_path) || '';
+    document.getElementById('cfgMasscan').value = (cfg.scan && cfg.scan.masscan_path) || '';
     document.getElementById('cfgProxy').value = (cfg.proxy && cfg.proxy.http_url) || '';
     document.getElementById('cfgPath').textContent = await go.ConfigPath();
   } catch(e) { toast('加载配置失败: ' + e, true); }
@@ -430,6 +446,8 @@ async function saveConfig() {
   cfg.scan.concurrency = parseInt(document.getElementById('cfgConcurrency').value) || 100;
   cfg.scan.timeout_sec = parseInt(document.getElementById('cfgTimeout').value) || 5;
   cfg.scan.default_port_mode = document.getElementById('cfgPortMode').value;
+  cfg.scan.nmap_path = document.getElementById('cfgNmap').value.trim();
+  cfg.scan.masscan_path = document.getElementById('cfgMasscan').value.trim();
   cfg.screenshot = cfg.screenshot || {}; cfg.screenshot.chrome_path = document.getElementById('cfgChrome').value.trim();
   cfg.proxy = cfg.proxy || {}; cfg.proxy.http_url = document.getElementById('cfgProxy').value.trim();
   try { await go.SaveConfig(cfg); closeConfig(); toast('配置已保存'); }
@@ -450,6 +468,28 @@ async function detectChrome() {
       toast('已探测到: ' + path);
     } else {
       toast('未找到 Chrome，请手动填写路径', true);
+    }
+  } catch(e) { toast('探测失败: ' + e, true); }
+}
+async function detectNmap() {
+  try {
+    const path = await go.DetectNmapPath();
+    if (path) {
+      document.getElementById('cfgNmap').value = path;
+      toast('已探测到: ' + path);
+    } else {
+      toast('未找到 nmap，请手动填写路径', true);
+    }
+  } catch(e) { toast('探测失败: ' + e, true); }
+}
+async function detectMasscan() {
+  try {
+    const path = await go.DetectMasscanPath();
+    if (path) {
+      document.getElementById('cfgMasscan').value = path;
+      toast('已探测到: ' + path);
+    } else {
+      toast('未找到 masscan，请手动填写路径', true);
     }
   } catch(e) { toast('探测失败: ' + e, true); }
 }

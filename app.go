@@ -291,6 +291,16 @@ func (a *App) DetectChromePath() string {
 	return core.DetectChromePath()
 }
 
+// DetectNmapPath 探测本机 nmap 可执行文件路径。
+func (a *App) DetectNmapPath() string {
+	return core.DetectNmapPath()
+}
+
+// DetectMasscanPath 探测本机 masscan 可执行文件路径。
+func (a *App) DetectMasscanPath() string {
+	return core.DetectMasscanPath()
+}
+
 // openFile 用系统默认程序打开文件。
 func openFile(path string) error {
 	var cmd *exec.Cmd

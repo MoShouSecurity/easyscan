@@ -13,9 +13,12 @@ type NmapScanner struct {
 	binary string
 }
 
-// NewNmapScanner 检测 nmap 并创建扫描器。
-func NewNmapScanner() *NmapScanner {
-	return &NmapScanner{binary: findNmap()}
+// NewNmapScanner 创建 nmap 扫描器，binary 为空时自动探测。
+func NewNmapScanner(binary string) *NmapScanner {
+	if binary == "" {
+		binary = findNmap()
+	}
+	return &NmapScanner{binary: binary}
 }
 
 // Available 返回 nmap 是否可用。
@@ -24,6 +27,19 @@ func (n *NmapScanner) Available() bool { return n.binary != "" }
 // findNmap 查找 nmap 二进制。
 func findNmap() string {
 	if p, err := exec.LookPath("nmap"); err == nil {
+		return p
+	}
+	return ""
+}
+
+// DetectNmapPath 探测 nmap 可执行文件路径。
+func DetectNmapPath() string {
+	return findNmap()
+}
+
+// DetectMasscanPath 探测 masscan 可执行文件路径。
+func DetectMasscanPath() string {
+	if p, err := exec.LookPath("masscan"); err == nil {
 		return p
 	}
 	return ""

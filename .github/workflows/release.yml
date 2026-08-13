@@ -1,0 +1,99 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            platform: darwin/amd64
+            artifact: easyscan-darwin-amd64
+          - os: macos-latest
+            platform: darwin/arm64
+            artifact: easyscan-darwin-arm64
+          - os: windows-latest
+            platform: windows/amd64
+            artifact: easyscan-windows-amd64
+          - os: windows-latest
+            platform: windows/arm64
+            artifact: easyscan-windows-arm64
+          - os: ubuntu-latest
+            platform: linux/amd64
+            artifact: easyscan-linux-amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Linux dependencies (GTK / WebKit / libpcap)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libpcap-dev
+
+      - name: Install Wails CLI
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.14.0
+
+      - name: Build (${{ matrix.platform }})
+        run: wails build -platform ${{ matrix.platform }}
+
+      - name: Rename Windows binary
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          mv build/bin/easyscan.exe build/bin/${{ matrix.artifact }}.exe
+
+      - name: Package macOS app
+        if: runner.os == 'macOS'
+        run: |
+          cd build/bin
+          zip -r ${{ matrix.artifact }}.zip easyscan.app
+
+      - name: Package Linux binary
+        if: runner.os == 'Linux'
+        run: |
+          cd build/bin
+          tar -czf ${{ matrix.artifact }}.tar.gz easyscan
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            build/bin/*.zip
+            build/bin/*.tar.gz
+            build/bin/*.exe
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true

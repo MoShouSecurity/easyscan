@@ -37,6 +37,8 @@ func NewScreenshotter(chromePath, dir string) (*Screenshotter, error) {
 		chromedp.DisableGPU,
 		chromedp.WindowSize(1366, 768),
 		chromedp.Flag("ignore-certificate-errors", true),
+		// 参考 Goby 的 chromedp 配置，避免 headless Chrome 共享内存不足导致截图失败。
+		chromedp.Flag("disable-dev-shm-usage", true),
 	}
 	if chromePath != "" {
 		opts = append([]chromedp.ExecAllocatorOption{chromedp.ExecPath(chromePath)}, opts...)

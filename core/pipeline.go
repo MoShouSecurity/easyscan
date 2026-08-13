@@ -369,19 +369,41 @@ func IsIPTarget(target string) bool {
 	return false
 }
 
-// expandTarget 将单个 IP 或 CIDR 展开为 IP 列表。
+// expandTarget 将单个或多个 IP/CIDR 展开为 IP 列表。
+// 支持逗号、空格、换行、分号分隔的多个 IP 或网段。
 func expandTarget(target string) ([]string, error) {
-	target = strings.TrimSpace(target)
-	if ip := net.ParseIP(target); ip != nil {
-		return []string{ip.String()}, nil
-	}
-	_, ipnet, err := net.ParseCIDR(target)
-	if err != nil {
-		return nil, fmt.Errorf("无效的 IP 或网段: %s", target)
-	}
+	parts := strings.FieldsFunc(target, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\n' || r == '\t' || r == ';' || r == '\r'
+	})
 	var out []string
-	for ip := ipnet.IP.Mask(ipnet.Mask); ipnet.Contains(ip); incIP(ip) {
-		out = append(out, ip.String())
+	seen := map[string]bool{}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if ip := net.ParseIP(part); ip != nil {
+			s := ip.String()
+			if !seen[s] {
+				seen[s] = true
+				out = append(out, s)
+			}
+			continue
+		}
+		_, ipnet, err := net.ParseCIDR(part)
+		if err != nil {
+			return nil, fmt.Errorf("无效的 IP 或网段: %s", part)
+		}
+		for ip := ipnet.IP.Mask(ipnet.Mask); ipnet.Contains(ip); incIP(ip) {
+			s := ip.String()
+			if !seen[s] {
+				seen[s] = true
+				out = append(out, s)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("无效的 IP 或网段: %s", target)
 	}
 	return out, nil
 }

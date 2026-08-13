@@ -112,8 +112,8 @@
 <div class="modal-mask" id="modal">
   <div class="modal">
     <h2>新建侦察任务</h2>
-    <label>目标（根域名 / IP / IP段）</label>
-    <input type="text" id="mTarget" placeholder="example.com 或 1.2.3.0/24" oninput="updateTypeHint()" />
+    <label>目标（支持多个，每行一个；域名拆多个任务，IP 合并一个任务）</label>
+    <textarea id="mTarget" rows="3" placeholder="example.com&#10;1.2.3.0/24" oninput="updateTypeHint()" style="resize:vertical"></textarea>
     <div id="typeHint" style="font-size:11px;color:var(--accent);margin-top:4px;display:none"></div>
     <label>端口模式</label>
     <select id="mPort"><option value="test">测试（6端口）</option><option value="top100">Top 100</option><option value="top1000" selected>Top 1000</option><option value="all">全部端口</option></select>
@@ -395,34 +395,55 @@ async function exportTask(taskID) {
 }
 
 /* ---------- 添加任务 ---------- */
+function isIPTarget(t) {
+  return /^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/.test(t) || t.includes(':');
+}
+function splitTargets(text) {
+  return text.split(/[\n,;]+/).map(s => s.trim()).filter(Boolean);
+}
 function updateTypeHint() {
-  const t = document.getElementById('mTarget').value.trim();
+  const targets = splitTargets(document.getElementById('mTarget').value);
   const hint = document.getElementById('typeHint');
-  if (!t) { hint.style.display = 'none'; return; }
-  const isIP = /^\d{1,3}(\.\d{1,3}){3}(\/\d{1,2})?$/.test(t) || t.includes(':');
+  if (!targets.length) { hint.style.display = 'none'; return; }
+  const domains = targets.filter(t => !isIPTarget(t));
+  const ips = targets.filter(t => isIPTarget(t));
   hint.style.display = '';
-  hint.textContent = isIP ? '识别为：IP / 网段' : '识别为：域名';
+  let msg = '';
+  if (domains.length) msg += domains.length + ' 个域名';
+  if (ips.length) msg += (msg ? '，' : '') + ips.length + ' 个 IP';
+  hint.textContent = '识别：' + msg + '（域名拆多个任务，IP 合并一个任务）';
 }
 function openAddTask() { document.getElementById('modal').classList.add('show'); }
 function closeAddTask() { document.getElementById('modal').classList.remove('show'); }
 async function submitTask() {
-  const target = document.getElementById('mTarget').value.trim();
-  if (!target) { toast('请输入目标', true); return; }
+  const targets = splitTargets(document.getElementById('mTarget').value);
+  if (!targets.length) { toast('请输入目标', true); return; }
   const btn = document.getElementById('mSubmit');
   btn.disabled = true; btn.textContent = '提交中…';
   try {
-    await go.StartScan({
-      target,
-      type: '', // 空则后端自动判断域名/IP
+    const domains = targets.filter(t => !isIPTarget(t));
+    const ips = targets.filter(t => isIPTarget(t));
+    const base = {
       port_mode: document.getElementById('mPort').value,
       brute: document.getElementById('mBrute').checked,
       no_ping: document.getElementById('mNoPing').checked,
       nuclei: document.getElementById('mNuclei').checked,
       file_leak: document.getElementById('mLeak').checked,
       screenshot: document.getElementById('mShot').checked,
-    });
+    };
+    let count = 0;
+    // 域名：每个一个独立任务
+    for (const d of domains) {
+      await go.StartScan({ ...base, type: '', target: d });
+      count++;
+    }
+    // IP/网段：合并为一个任务
+    if (ips.length) {
+      await go.StartScan({ ...base, type: 'ip', target: ips.join(',') });
+      count++;
+    }
     closeAddTask();
-    toast('任务已提交');
+    toast('已提交 ' + count + ' 个任务');
     renderHome();
   } catch(e) { toast('提交失败: ' + e, true); }
   finally { btn.disabled = false; btn.textContent = '开始侦察'; }

@@ -99,6 +99,12 @@ func TestExpandTarget(t *testing.T) {
 	if _, err := expandTarget("not-an-ip"); err == nil {
 		t.Fatal("expandTarget(invalid) should error")
 	}
+
+	// 多个 IP/CIDR 合并展开。
+	ips, err = expandTarget("1.2.3.4, 5.6.7.0/30")
+	if err != nil || len(ips) != 5 {
+		t.Fatalf("expandTarget(multi) = %v err=%v; want 5 IPs", ips, err)
+	}
 }
 
 func TestIsIPTarget(t *testing.T) {

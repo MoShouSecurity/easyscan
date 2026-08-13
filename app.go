@@ -386,6 +386,7 @@ func openFile(path string) error {
 		cmd = exec.Command("open", path)
 	case "windows":
 		cmd = exec.Command("cmd", "/c", "start", "", path)
+		core.HideCmdWindow(cmd) // 只隐藏 cmd 窗口本身，start 打开的目标程序正常显示
 	default:
 		cmd = exec.Command("xdg-open", path)
 	}

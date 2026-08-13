@@ -107,6 +107,24 @@ func TestExpandTarget(t *testing.T) {
 	}
 }
 
+func TestSplitTargets(t *testing.T) {
+	// CIDR 保持原样（供 nmap 直接使用，避免展开成大量参数）。
+	parts, err := splitTargets("10.10.0.0/16")
+	if err != nil || len(parts) != 1 || parts[0] != "10.10.0.0/16" {
+		t.Fatalf("splitTargets(cidr) = %v err=%v; want [10.10.0.0/16]", parts, err)
+	}
+
+	// 混合 IP/CIDR 拆分去重。
+	parts, err = splitTargets("1.2.3.4, 5.6.7.0/30;1.2.3.4 2001:db8::1")
+	if err != nil || len(parts) != 3 {
+		t.Fatalf("splitTargets(multi) = %v err=%v; want 3 条", parts, err)
+	}
+
+	if _, err := splitTargets("not-an-ip"); err == nil {
+		t.Fatal("splitTargets(invalid) should error")
+	}
+}
+
 func TestIsIPTarget(t *testing.T) {
 	cases := map[string]bool{
 		"1.2.3.4":         true,
@@ -125,10 +143,10 @@ func TestIsIPTarget(t *testing.T) {
 
 func TestGuessServiceFromBanner(t *testing.T) {
 	cases := map[string]string{
-		"SSH-2.0-OpenSSH_8.9": "ssh",
+		"SSH-2.0-OpenSSH_8.9":          "ssh",
 		"HTTP/1.1 400 Bad Request\r\n": "http",
-		"+OK Hello":            "pop3",
-		"220 smtp.example ESMTP": "smtp",
+		"+OK Hello":                    "pop3",
+		"220 smtp.example ESMTP":       "smtp",
 	}
 	for banner, want := range cases {
 		if got := guessServiceFromBanner(banner); got != want {

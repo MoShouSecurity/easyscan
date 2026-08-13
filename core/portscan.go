@@ -56,6 +56,68 @@ func scanIPPorts(ctx context.Context, ip string, ports []int, limit int, timeout
 	return open
 }
 
+// hostProbePorts 存活探测端口：TCP connect 探测这些常见端口，任一成功即视为存活。
+// 覆盖 SSH/HTTP/HTTPS/SMB/RDP/常见 Web 端口，思路与 nmap -sn 的 TCP 探测一致，且无需特权。
+var hostProbePorts = []int{22, 80, 443, 445, 3389, 8080}
+
+// probePorts 依次 TCP connect 探测端口列表，任一开放即视为存活。
+func probePorts(ctx context.Context, ip string, ports []int, timeout time.Duration) bool {
+	for _, p := range ports {
+		if ctx.Err() != nil {
+			return false
+		}
+		if scanPort(ctx, ip, p, timeout) {
+			return true
+		}
+	}
+	return false
+}
+
+// probeHostAlive 依次 TCP connect 探测常见端口，任一开放即视为存活。
+func probeHostAlive(ctx context.Context, ip string, timeout time.Duration) bool {
+	return probePorts(ctx, ip, hostProbePorts, timeout)
+}
+
+// pingSweepGo 纯 Go TCP 存活探测（无 nmap 时的兜底），返回存活 IP 列表。
+func pingSweepGo(ctx context.Context, ips []string, concurrency int, timeout time.Duration) []string {
+	return pingSweepPorts(ctx, ips, hostProbePorts, concurrency, timeout)
+}
+
+// pingSweepPorts 并发对每个 IP 探测指定端口，任一端口连通即视为存活。
+func pingSweepPorts(ctx context.Context, ips []string, ports []int, concurrency int, timeout time.Duration) []string {
+	if concurrency <= 0 {
+		concurrency = 500
+	}
+	var alive []string
+	var mu sync.Mutex
+
+	jobs := make(chan string)
+	var wg sync.WaitGroup
+	n := concurrency
+	if n > len(ips) {
+		n = len(ips)
+	}
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for ip := range jobs {
+				if probePorts(ctx, ip, ports, timeout) {
+					mu.Lock()
+					alive = append(alive, ip)
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	for _, ip := range ips {
+		jobs <- ip
+	}
+	close(jobs)
+	wg.Wait()
+	return alive
+}
+
 // grabBanner 连接开放端口，尝试读取一段 banner 用于服务识别。
 func grabBanner(ctx context.Context, ip string, port int, timeout time.Duration) (service, banner string) {
 	service = commonServices[port]

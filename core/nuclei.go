@@ -330,6 +330,7 @@ func DownloadNucleiTemplates(destDir, repo string) error {
 	if _, err := os.Stat(filepath.Join(destDir, ".git")); err == nil {
 		// 已存在，执行 pull 更新。
 		cmd := exec.Command("git", "-C", destDir, "pull", "--depth", "1")
+		HideCmdWindow(cmd)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		return cmd.Run()
@@ -338,6 +339,7 @@ func DownloadNucleiTemplates(destDir, repo string) error {
 		return err
 	}
 	cmd := exec.Command("git", "clone", "--depth", "1", repo, destDir)
+	HideCmdWindow(cmd)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()

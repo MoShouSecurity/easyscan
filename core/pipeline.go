@@ -166,7 +166,7 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, s
 	var sites []Site
 	if stageIndex(startStage) <= stageIndex(StagePortScan) {
 		e.updateStage(taskID, StagePortScan)
-		sites = e.scanPortsAndSites(ctx, ips, ipHosts, taskID, report, 30, 60)
+		sites = e.scanPortsAndSites(ctx, ips, nil, ipHosts, taskID, report, 30, 60)
 	} else {
 		sites, _ = e.store.ListSitesByTask(taskID, 0)
 	}
@@ -190,6 +190,8 @@ func (e *Engine) ScanIPs(ctx context.Context, target string, taskID string, star
 	if err != nil {
 		return err
 	}
+	// nmap 直接接收原始 IP/CIDR 条目，避免展开成大量参数（Windows 命令行长度限制）。
+	nmapTargets, _ := splitTargets(target)
 	report := func(stage, detail string, pct int) {
 		if progress != nil {
 			progress(stage, detail, pct)
@@ -200,7 +202,7 @@ func (e *Engine) ScanIPs(ctx context.Context, target string, taskID string, star
 	if stageIndex(startStage) <= stageIndex(StagePortScan) {
 		e.updateStage(taskID, StagePortScan)
 		report("端口扫描", fmt.Sprintf("目标 %d 个 IP (模式: %s) ...", len(ips), e.opts.PortMode), 1)
-		sites = e.scanPortsAndSites(ctx, ips, nil, taskID, report, 0, 90)
+		sites = e.scanPortsAndSites(ctx, ips, nmapTargets, nil, taskID, report, 0, 90)
 	} else {
 		sites, _ = e.store.ListSitesByTask(taskID, 0)
 	}
@@ -217,30 +219,70 @@ func (e *Engine) ScanIPs(ctx context.Context, target string, taskID string, star
 }
 
 // scanPortsAndSites 对一组 IP 做 IP 存活确认 + 端口扫描 + 服务识别 + 指纹，返回去重后的站点列表。
+// nmapTargets 为 nmap 使用的原始目标条目（支持 CIDR，避免展开成大量参数）；为空则退回 ips。
 // base/span 为进度区间（如 base=30, span=60 表示进度从 30% 推进到 90%）。
 // 优先用 nmap（-sn 存活确认 + -sV 服务/版本识别），不可用/失败时降级纯 Go 扫描。
-func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, ipHosts map[string][]string, taskID string, report ProgressFunc, base int, span int) []Site {
+func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTargets []string, ipHosts map[string][]string, taskID string, report ProgressFunc, base int, span int) []Site {
 	siteMap := map[string]Site{}
 	nmap := NewNmapScanner(e.opts.NmapPath)
-
-	// 1. IP 存活确认（nmap -sn 综合 ICMP/TCP/ARP 探测；目标禁 ping 时跳过直接扫描）。
-	alive := ips
-	if !e.opts.NoPing && nmap.Available() {
-		report("IP存活确认", fmt.Sprintf("ping 探测 %d 个 IP ...", len(ips)), base)
-		alive = nmap.PingSweep(ctx, ips)
-		report("IP存活确认", fmt.Sprintf("%d/%d 个 IP 存活", len(alive), len(ips)), base+span/10)
-	} else if e.opts.NoPing {
-		report("IP存活确认", "目标禁 ping，跳过存活确认直接扫描", base)
+	nmapT := nmapTargets
+	if len(nmapT) == 0 {
+		nmapT = ips
 	}
 
-	// 存活 IP 入库（即使无开放端口也记录，详情页「IP存活」显示）。
-	for _, ip := range alive {
+	// 1. IP 存活确认（nmap -sn 综合 ICMP/TCP/ARP 探测，无 nmap 时降级纯 Go TCP 探测）。
+	// alive 决定扫描范围；confirmed 记录确认存活的 IP（探测命中或发现开放端口），
+	// 只有 confirmed 才入库「IP存活」，避免把网段内不存在的 IP 大量收录。
+	alive := ips
+	confirmed := map[string]bool{}
+	discovered := false // 是否已通过探测获得存活结果
+	if e.opts.NoPing {
+		report("IP存活确认", "目标禁 ping，跳过存活确认直接扫描", base)
+	} else {
+		if nmap.Available() {
+			report("IP存活确认", fmt.Sprintf("nmap ping 探测 %d 个 IP ...", len(ips)), base)
+			hit := nmap.PingSweep(ctx, nmapT)
+			report("IP存活确认", fmt.Sprintf("nmap 确认 %d/%d 个 IP 存活", len(hit), len(ips)), base+span/10)
+			if len(hit) > 0 {
+				alive, discovered = hit, true
+			}
+		}
+		if !discovered {
+			report("IP存活确认", fmt.Sprintf("纯 Go TCP 探测 %d 个 IP ...", len(ips)), base)
+			probeTO := e.opts.Timeout
+			if probeTO > 2*time.Second {
+				probeTO = 2 * time.Second
+			}
+			alive = pingSweepGo(ctx, ips, e.opts.Concurrency, probeTO)
+			discovered = true
+			report("IP存活确认", fmt.Sprintf("TCP 探测确认 %d/%d 个 IP 存活", len(alive), len(ips)), base+span/10)
+		}
+		for _, ip := range alive {
+			confirmed[ip] = true
+		}
+		if len(alive) == 0 && len(ips) <= 256 {
+			// 目标较少时失败开放：探测无结果仍扫描全部，避免漏掉不响应探测的 IP。
+			// 注意不影响 confirmed，未确认的 IP 不会入库。
+			alive = ips
+			report("IP存活确认", "未确认到存活主机，目标较少，仍扫描全部", base)
+		}
+	}
+
+	// recordAlive 确认存活 IP 入库（即使无开放端口也记录，详情页「IP存活」显示）。
+	recordAlive := func(ip string) {
+		if confirmed[ip] {
+			return
+		}
+		confirmed[ip] = true
 		_ = e.store.UpsertIP(IP{
 			ID:        newID(),
 			IP:        ip,
 			TaskID:    taskID,
 			CreatedAt: nowUnix(),
 		})
+	}
+	for ip := range confirmed {
+		recordAlive(ip)
 	}
 
 	// 2. nmap 端口扫描 + 服务/版本识别。
@@ -249,6 +291,9 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, ipHosts ma
 		hosts, err := nmap.Scan(ctx, alive, e.opts.PortMode)
 		if err == nil {
 			for _, h := range hosts {
+				if len(h.Ports) > 0 {
+					recordAlive(h.IP)
+				}
 				hostname := ""
 				if ipHosts != nil {
 					if hs := ipHosts[h.IP]; len(hs) > 0 {
@@ -294,6 +339,9 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, ipHosts ma
 			}
 		}
 		open := scanIPPorts(ctx, ip, ports, e.opts.Concurrency, e.opts.Timeout)
+		if len(open) > 0 {
+			recordAlive(ip)
+		}
 		for _, p := range open {
 			service, banner := grabBanner(ctx, ip, p, e.opts.Timeout)
 			rec := Port{
@@ -454,9 +502,9 @@ func IsIPTarget(target string) bool {
 	return false
 }
 
-// expandTarget 将单个或多个 IP/CIDR 展开为 IP 列表。
+// splitTargets 拆分并校验目标字符串，返回去重后的 IP/CIDR 条目（保持原样，供 nmap 使用）。
 // 支持逗号、空格、换行、分号分隔的多个 IP 或网段。
-func expandTarget(target string) ([]string, error) {
+func splitTargets(target string) ([]string, error) {
 	parts := strings.FieldsFunc(target, func(r rune) bool {
 		return r == ',' || r == ' ' || r == '\n' || r == '\t' || r == ';' || r == '\r'
 	})
@@ -467,6 +515,31 @@ func expandTarget(target string) ([]string, error) {
 		if part == "" {
 			continue
 		}
+		if net.ParseIP(part) == nil {
+			if _, _, err := net.ParseCIDR(part); err != nil {
+				return nil, fmt.Errorf("无效的 IP 或网段: %s", part)
+			}
+		}
+		if !seen[part] {
+			seen[part] = true
+			out = append(out, part)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("无效的 IP 或网段: %s", target)
+	}
+	return out, nil
+}
+
+// expandTarget 将单个或多个 IP/CIDR 展开为 IP 列表（纯 Go 扫描使用）。
+func expandTarget(target string) ([]string, error) {
+	parts, err := splitTargets(target)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, part := range parts {
 		if ip := net.ParseIP(part); ip != nil {
 			s := ip.String()
 			if !seen[s] {
@@ -475,10 +548,7 @@ func expandTarget(target string) ([]string, error) {
 			}
 			continue
 		}
-		_, ipnet, err := net.ParseCIDR(part)
-		if err != nil {
-			return nil, fmt.Errorf("无效的 IP 或网段: %s", part)
-		}
+		_, ipnet, _ := net.ParseCIDR(part)
 		for ip := ipnet.IP.Mask(ipnet.Mask); ipnet.Contains(ip); incIP(ip) {
 			s := ip.String()
 			if !seen[s] {
@@ -486,9 +556,6 @@ func expandTarget(target string) ([]string, error) {
 				out = append(out, s)
 			}
 		}
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("无效的 IP 或网段: %s", target)
 	}
 	return out, nil
 }

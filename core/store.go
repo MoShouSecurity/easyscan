@@ -136,6 +136,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 		{"ports", "version", "TEXT DEFAULT ''"},
 		{"sites", "task_id", "TEXT DEFAULT ''"},
 		{"sites", "screenshot", "TEXT DEFAULT ''"},
+		{"tasks", "stage", "TEXT DEFAULT ''"},
 	} {
 		if err := s.ensureColumn(c.table, c.col, c.decl); err != nil {
 			return err
@@ -223,9 +224,9 @@ func (s *Store) CreateTask(t *Task) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.Exec(
-		`INSERT INTO tasks(id, target, type, status, progress, message, params, created_at, finished_at)
-		 VALUES(?,?,?,?,?,?,?,?,?)`,
-		t.ID, t.Target, string(t.Type), string(t.Status), t.Progress, t.Message, t.Params, t.CreatedAt, t.FinishedAt)
+		`INSERT INTO tasks(id, target, type, status, progress, message, stage, params, created_at, finished_at)
+		 VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		t.ID, t.Target, string(t.Type), string(t.Status), t.Progress, t.Message, t.Stage, t.Params, t.CreatedAt, t.FinishedAt)
 	return err
 }
 
@@ -233,16 +234,24 @@ func (s *Store) UpdateTask(t *Task) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	_, err := s.db.Exec(
-		`UPDATE tasks SET status=?, progress=?, message=?, finished_at=? WHERE id=?`,
-		string(t.Status), t.Progress, t.Message, t.FinishedAt, t.ID)
+		`UPDATE tasks SET status=?, progress=?, message=?, stage=?, finished_at=? WHERE id=?`,
+		string(t.Status), t.Progress, t.Message, t.Stage, t.FinishedAt, t.ID)
+	return err
+}
+
+// UpdateTaskStage 仅更新任务的当前阶段（用于断点续扫，不碰其他字段）。
+func (s *Store) UpdateTaskStage(id, stage string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`UPDATE tasks SET stage=? WHERE id=?`, stage, id)
 	return err
 }
 
 func (s *Store) GetTask(id string) (*Task, error) {
-	row := s.db.QueryRow(`SELECT id, target, type, status, progress, message, params, created_at, finished_at FROM tasks WHERE id=?`, id)
+	row := s.db.QueryRow(`SELECT id, target, type, status, progress, message, stage, params, created_at, finished_at FROM tasks WHERE id=?`, id)
 	var t Task
 	var typ, status string
-	if err := row.Scan(&t.ID, &t.Target, &typ, &status, &t.Progress, &t.Message, &t.Params, &t.CreatedAt, &t.FinishedAt); err != nil {
+	if err := row.Scan(&t.ID, &t.Target, &typ, &status, &t.Progress, &t.Message, &t.Stage, &t.Params, &t.CreatedAt, &t.FinishedAt); err != nil {
 		return nil, err
 	}
 	t.Type, t.Status = TaskType(typ), TaskStatus(status)
@@ -287,7 +296,7 @@ func (s *Store) ListTasks(limit int) ([]Task, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.Query(`SELECT id, target, type, status, progress, message, params, created_at, finished_at FROM tasks ORDER BY created_at DESC LIMIT ?`, limit)
+	rows, err := s.db.Query(`SELECT id, target, type, status, progress, message, stage, params, created_at, finished_at FROM tasks ORDER BY created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -296,7 +305,7 @@ func (s *Store) ListTasks(limit int) ([]Task, error) {
 	for rows.Next() {
 		var t Task
 		var typ, status string
-		if err := rows.Scan(&t.ID, &t.Target, &typ, &status, &t.Progress, &t.Message, &t.Params, &t.CreatedAt, &t.FinishedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.Target, &typ, &status, &t.Progress, &t.Message, &t.Stage, &t.Params, &t.CreatedAt, &t.FinishedAt); err != nil {
 			return nil, err
 		}
 		t.Type, t.Status = TaskType(typ), TaskStatus(status)

@@ -52,7 +52,7 @@ func main() {
 		taskType = core.TaskIP
 	}
 
-	err = engine.ScanTarget(ctx, *target, taskType, "", func(stage, detail string, progress int) {
+	err = engine.ScanTarget(ctx, *target, taskType, "", "", func(stage, detail string, progress int) {
 		fmt.Printf("  [%3d%%] %s: %s\n", progress, stage, detail)
 	})
 	if err != nil {

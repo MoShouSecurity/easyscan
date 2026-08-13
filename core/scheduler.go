@@ -129,7 +129,7 @@ func (s *Scheduler) run(t *Task) {
 
 	update(TaskRunning, 0, "任务启动")
 
-	err := engine.ScanTarget(ctx, t.Target, t.Type, t.ID, func(stage, detail string, progress int) {
+	err := engine.ScanTarget(ctx, t.Target, t.Type, t.ID, t.Stage, func(stage, detail string, progress int) {
 		update(TaskRunning, progress, stage+": "+detail)
 	})
 

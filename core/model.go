@@ -113,6 +113,7 @@ type Task struct {
 	Status     TaskStatus `json:"status"`
 	Progress   int        `json:"progress"`
 	Message    string     `json:"message"`
+	Stage      string     `json:"stage"` // 当前阶段，用于分阶段断点续扫
 	Params     string     `json:"params"`
 	CreatedAt  int64      `json:"created_at"`
 	FinishedAt int64      `json:"finished_at"`

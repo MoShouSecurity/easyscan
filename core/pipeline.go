@@ -29,18 +29,51 @@ func NewEngine(store *Store, opts ScanOptions) *Engine {
 // ProgressFunc 进度回调，用于实时上报（GUI / CLI）。progress 为 0-100 的百分比。
 type ProgressFunc func(stage string, detail string, progress int)
 
-// ScanTarget 按目标类型分发到域名或 IP 侦察流程。taskID 为空表示不关联任务（如 CLI）。
-func (e *Engine) ScanTarget(ctx context.Context, target string, typ TaskType, taskID string, progress ProgressFunc) error {
-	switch typ {
-	case TaskIP:
-		return e.ScanIPs(ctx, target, taskID, progress)
+// 扫描阶段（用于分阶段断点续扫）。
+const (
+	StageSubdomain   = "subdomain"   // 子域名枚举
+	StageDNS         = "dns"         // DNS 解析
+	StagePortScan    = "portscan"    // 端口扫描
+	StagePostProcess = "postprocess" // 附加模块
+)
+
+// stageIndex 返回阶段序号，用于比较（恢复时跳过已完成阶段）。
+func stageIndex(stage string) int {
+	switch stage {
+	case StageSubdomain:
+		return 1
+	case StageDNS:
+		return 2
+	case StagePortScan:
+		return 3
+	case StagePostProcess:
+		return 4
 	default:
-		return e.ScanDomain(ctx, target, taskID, progress)
+		return 0
 	}
 }
 
-// ScanDomain 执行域名侦察完整流程。
-func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, progress ProgressFunc) error {
+// updateStage 记录任务当前阶段（持久化，用于断点续扫）。
+func (e *Engine) updateStage(taskID, stage string) {
+	if taskID == "" {
+		return
+	}
+	_ = e.store.UpdateTaskStage(taskID, stage)
+}
+
+// ScanTarget 按目标类型分发到域名或 IP 侦察流程。
+// taskID 为空表示不关联任务（如 CLI）。startStage 用于断点续扫，空则从头执行。
+func (e *Engine) ScanTarget(ctx context.Context, target string, typ TaskType, taskID string, startStage string, progress ProgressFunc) error {
+	switch typ {
+	case TaskIP:
+		return e.ScanIPs(ctx, target, taskID, startStage, progress)
+	default:
+		return e.ScanDomain(ctx, target, taskID, startStage, progress)
+	}
+}
+
+// ScanDomain 执行域名侦察完整流程。startStage 用于断点续扫，空则从头执行。
+func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, startStage string, progress ProgressFunc) error {
 	domain = strings.TrimSpace(strings.ToLower(domain))
 	domain = strings.TrimPrefix(domain, "http://")
 	domain = strings.TrimPrefix(domain, "https://")
@@ -55,7 +88,7 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, p
 		}
 	}
 
-	// 1. 记录根域名。
+	// 1. 记录根域名（总是执行）。
 	if err := e.store.UpsertDomain(Domain{ID: newID(), Domain: domain, Source: "manual", CreatedAt: nowUnix()}); err != nil {
 		return err
 	}
@@ -63,58 +96,84 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, p
 
 	subs := map[string]bool{domain: true}
 
-	// 2. 子域名爆破（ksubdomain 无状态爆破，失败时降级为纯 Go 字典爆破）。
-	if e.opts.SubdomainBrute {
-		report("子域名枚举", "无状态爆破 ...", 5)
-		for _, s := range enumerateSubdomains(ctx, domain, e.opts) {
-			subs[s] = true
+	// 2. 子域名枚举（断点续扫时跳过，从数据库恢复）。
+	if stageIndex(startStage) <= stageIndex(StageSubdomain) {
+		e.updateStage(taskID, StageSubdomain)
+		if e.opts.SubdomainBrute {
+			report("子域名枚举", "无状态爆破 ...", 5)
+			for _, s := range enumerateSubdomains(ctx, domain, e.opts) {
+				subs[s] = true
+			}
+		}
+		report("子域名枚举", fmt.Sprintf("共发现 %d 个子域名", len(subs)), 20)
+	} else {
+		saved, _ := e.store.ListSubdomains(domain, 0)
+		for _, sd := range saved {
+			subs[sd.Subdomain] = true
 		}
 	}
 
 	all := keysOf(subs)
 	sort.Strings(all)
-	report("子域名枚举", fmt.Sprintf("共发现 %d 个子域名", len(all)), 20)
 
-	// 4. DNS 解析。
-	report("DNS 解析", "解析 A 记录 ...", 22)
-	resolved := resolveBatch(ctx, all, e.opts.Concurrency, e.opts.Timeout)
-
+	// 3. DNS 解析（断点续扫时跳过，从数据库恢复 IP）。
 	ipHosts := map[string][]string{} // ip -> 关联域名
-	for _, host := range all {
-		ips := resolved[host]
-		if len(ips) == 0 {
-			continue
+	if stageIndex(startStage) <= stageIndex(StageDNS) {
+		e.updateStage(taskID, StageDNS)
+		report("DNS 解析", "解析 A 记录 ...", 22)
+		resolved := resolveBatch(ctx, all, e.opts.Concurrency, e.opts.Timeout)
+		for _, host := range all {
+			ips := resolved[host]
+			if len(ips) == 0 {
+				continue
+			}
+			sd := Subdomain{
+				ID:        newID(),
+				Domain:    domain,
+				Subdomain: host,
+				IP:        ips[0],
+				Source:    "resolved",
+				TaskID:    taskID,
+				CreatedAt: nowUnix(),
+			}
+			_ = e.store.UpsertSubdomain(sd)
+			for _, ip := range ips {
+				ipHosts[ip] = appendUnique(ipHosts[ip], host)
+			}
 		}
-		sd := Subdomain{
-			ID:        newID(),
-			Domain:    domain,
-			Subdomain: host,
-			IP:        ips[0],
-			Source:    "resolved",
-			TaskID:    taskID,
-			CreatedAt: nowUnix(),
-		}
-		_ = e.store.UpsertSubdomain(sd)
-		for _, ip := range ips {
-			ipHosts[ip] = appendUnique(ipHosts[ip], host)
+		report("DNS 解析", fmt.Sprintf("解析到 %d 个存活子域名 / %d 个独立 IP", len(resolved), len(keysOfSlice(ipHosts))), 30)
+	} else {
+		saved, _ := e.store.ListSubdomains(domain, 0)
+		for _, sd := range saved {
+			if sd.IP != "" {
+				ipHosts[sd.IP] = appendUnique(ipHosts[sd.IP], sd.Subdomain)
+			}
 		}
 	}
 
 	ips := keysOfSlice(ipHosts)
 	sort.Strings(ips)
-	report("DNS 解析", fmt.Sprintf("解析到 %d 个存活子域名 / %d 个独立 IP", len(resolved), len(ips)), 30)
 
-	// 5. 端口扫描 + 服务识别 + 指纹，收集站点供附加模块使用。（进度 30-90）
-	sites := e.scanPortsAndSites(ctx, ips, ipHosts, taskID, report, 30, 60)
+	// 4. 端口扫描 + 服务识别 + 指纹。（断点续扫时跳过，从数据库恢复站点）
+	var sites []Site
+	if stageIndex(startStage) <= stageIndex(StagePortScan) {
+		e.updateStage(taskID, StagePortScan)
+		sites = e.scanPortsAndSites(ctx, ips, ipHosts, taskID, report, 30, 60)
+	} else {
+		sites, _ = e.store.ListSitesByTask(taskID, 0)
+	}
 
-	// 6. 附加模块：文件泄漏 / POC / 截图。（进度 90-99）
-	e.postProcess(ctx, sites, taskID, report, 90)
+	// 5. 附加模块：文件泄漏 / POC / 截图。
+	if stageIndex(startStage) <= stageIndex(StagePostProcess) {
+		e.updateStage(taskID, StagePostProcess)
+		e.postProcess(ctx, sites, taskID, report, 90)
+	}
 
 	return nil
 }
 
-// ScanIPs 对 IP 或 CIDR 网段执行端口扫描流程。
-func (e *Engine) ScanIPs(ctx context.Context, target string, taskID string, progress ProgressFunc) error {
+// ScanIPs 对 IP 或 CIDR 网段执行端口扫描流程。startStage 用于断点续扫。
+func (e *Engine) ScanIPs(ctx context.Context, target string, taskID string, startStage string, progress ProgressFunc) error {
 	ips, err := expandTarget(target)
 	if err != nil {
 		return err
@@ -124,10 +183,20 @@ func (e *Engine) ScanIPs(ctx context.Context, target string, taskID string, prog
 			progress(stage, detail, pct)
 		}
 	}
-	report("端口扫描", fmt.Sprintf("目标 %d 个 IP (模式: %s) ...", len(ips), e.opts.PortMode), 1)
 
-	sites := e.scanPortsAndSites(ctx, ips, nil, taskID, report, 0, 90)
-	e.postProcess(ctx, sites, taskID, report, 90)
+	var sites []Site
+	if stageIndex(startStage) <= stageIndex(StagePortScan) {
+		e.updateStage(taskID, StagePortScan)
+		report("端口扫描", fmt.Sprintf("目标 %d 个 IP (模式: %s) ...", len(ips), e.opts.PortMode), 1)
+		sites = e.scanPortsAndSites(ctx, ips, nil, taskID, report, 0, 90)
+	} else {
+		sites, _ = e.store.ListSitesByTask(taskID, 0)
+	}
+
+	if stageIndex(startStage) <= stageIndex(StagePostProcess) {
+		e.updateStage(taskID, StagePostProcess)
+		e.postProcess(ctx, sites, taskID, report, 90)
+	}
 	return nil
 }
 

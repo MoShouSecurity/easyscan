@@ -1,0 +1,157 @@
+package core
+
+import (
+	"fmt"
+	"os"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+// ScanOptions 描述一次侦察任务的策略参数。
+type ScanOptions struct {
+	// PortMode 端口扫描模式：test / top100 / top1000 / all。
+	PortMode string `json:"port_mode"`
+	// SubdomainBrute 是否开启子域名字典爆破（ksubdomain 无状态爆破）。
+	SubdomainBrute bool `json:"subdomain_brute"`
+	// Nuclei 是否执行 POC 检测。
+	Nuclei bool `json:"nuclei"`
+	// FileLeak 是否执行敏感文件/信息泄漏检测。
+	FileLeak bool `json:"file_leak"`
+	// Screenshot 是否对站点首页截图。
+	Screenshot bool `json:"screenshot"`
+	// ScreenshotDir 截图保存目录。
+	ScreenshotDir string `json:"screenshot_dir"`
+	// ChromePath 截图用 Chrome 可执行文件路径（空则自动探测）。
+	ChromePath string `json:"chrome_path"`
+	// LeakDictPath 文件泄漏自定义字典文件（空则用内置字典）。
+	LeakDictPath string `json:"leak_dict_path"`
+	// NucleiTemplatesDir 自定义 nuclei 模板目录（空则用内置模板）。
+	NucleiTemplatesDir string `json:"nuclei_templates_dir"`
+	// ProviderConfigPath subfinder 的 provider-config.yaml 路径（空则用默认位置）。
+	ProviderConfigPath string `json:"provider_config_path"`
+	// Concurrency 并发度（0 表示使用默认值）。
+	Concurrency int `json:"concurrency"`
+	// Timeout 单次网络探测超时（0 表示默认值），序列化为纳秒以便任务参数往返。
+	Timeout time.Duration `json:"timeout_ns"`
+}
+
+// DefaultScanOptions 返回默认任务策略。
+func DefaultScanOptions() ScanOptions {
+	return ScanOptions{
+		PortMode:         "top100",
+		SubdomainBrute:   true,
+		Nuclei:           false,
+		FileLeak:         false,
+		Screenshot:       true,
+		Concurrency:      100,
+		Timeout:          5 * time.Second,
+	}
+}
+
+// Config 全局配置文件结构（config.yaml）。
+type Config struct {
+	Scan       ScanConfig        `yaml:"scan" json:"scan"`
+	FileLeak   FileLeakConfig    `yaml:"file_leak" json:"file_leak"`
+	Nuclei     NucleiConfig      `yaml:"nuclei" json:"nuclei"`
+	Subfinder  SubfinderConfig   `yaml:"subfinder" json:"subfinder"`
+	Screenshot ScreenshotConfig  `yaml:"screenshot" json:"screenshot"`
+	Proxy      ProxyConfig       `yaml:"proxy" json:"proxy"`
+	APIKeys    map[string]string `yaml:"api_keys" json:"api_keys"`
+}
+
+// ScanConfig 扫描通用参数。
+type ScanConfig struct {
+	Concurrency     int    `yaml:"concurrency" json:"concurrency"`
+	TimeoutSec      int    `yaml:"timeout_sec" json:"timeout_sec"`
+	DefaultPortMode string `yaml:"default_port_mode" json:"default_port_mode"`
+}
+
+// FileLeakConfig 文件泄漏检测配置。
+type FileLeakConfig struct {
+	DictPath string `yaml:"dict_path" json:"dict_path"` // 自定义字典文件，空则用内置
+}
+
+// NucleiConfig nuclei POC 检测配置。
+type NucleiConfig struct {
+	TemplatesDir  string `yaml:"templates_dir" json:"templates_dir"`   // 自定义模板目录
+	AutoDownload  bool   `yaml:"auto_download" json:"auto_download"`   // 是否自动下载官方模板库
+	TemplatesRepo string `yaml:"templates_repo" json:"templates_repo"` // 官方模板库 git 地址
+}
+
+// SubfinderConfig subfinder 被动子域名收集配置。
+type SubfinderConfig struct {
+	ProviderConfig string `yaml:"provider_config" json:"provider_config"` // provider-config.yaml 路径，空则用默认
+}
+
+// ScreenshotConfig 截图配置。
+type ScreenshotConfig struct {
+	ChromePath string `yaml:"chrome_path" json:"chrome_path"` // 自定义 Chrome 路径
+}
+
+// ProxyConfig 代理配置。
+type ProxyConfig struct {
+	HTTPURL string `yaml:"http_url" json:"http_url"`
+}
+
+// DefaultConfig 返回默认全局配置。
+func DefaultConfig() Config {
+	return Config{
+		Scan: ScanConfig{
+			Concurrency:     100,
+			TimeoutSec:      5,
+			DefaultPortMode: "top1000",
+		},
+		Nuclei: NucleiConfig{
+			TemplatesRepo: "https://github.com/projectdiscovery/nuclei-templates.git",
+		},
+		APIKeys: map[string]string{},
+	}
+}
+
+// LoadConfig 从 YAML 文件加载配置；文件不存在时返回默认配置。
+func LoadConfig(path string) (Config, error) {
+	cfg := DefaultConfig()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return cfg, nil
+		}
+		return cfg, fmt.Errorf("读取配置: %w", err)
+	}
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("解析配置: %w", err)
+	}
+	if cfg.Nuclei.TemplatesRepo == "" {
+		cfg.Nuclei.TemplatesRepo = DefaultConfig().Nuclei.TemplatesRepo
+	}
+	return cfg, nil
+}
+
+// Save 将配置写入 YAML 文件。
+func (c Config) Save(path string) error {
+	data, err := yaml.Marshal(&c)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
+}
+
+// ToOptions 将全局配置的默认参数合入任务策略。
+func (c Config) ToOptions() ScanOptions {
+	opts := DefaultScanOptions()
+	if c.Scan.Concurrency > 0 {
+		opts.Concurrency = c.Scan.Concurrency
+	}
+	if c.Scan.TimeoutSec > 0 {
+		opts.Timeout = time.Duration(c.Scan.TimeoutSec) * time.Second
+	}
+	if c.Scan.DefaultPortMode != "" {
+		opts.PortMode = c.Scan.DefaultPortMode
+	}
+	opts.LeakDictPath = c.FileLeak.DictPath
+	opts.NucleiTemplatesDir = c.Nuclei.TemplatesDir
+	opts.ProviderConfigPath = c.Subfinder.ProviderConfig
+	opts.ChromePath = c.Screenshot.ChromePath
+	return opts
+}

@@ -1,0 +1,353 @@
+package core
+
+import (
+	"context"
+	"fmt"
+	"net"
+	"sort"
+	"strings"
+	"time"
+)
+
+// Engine 侦察引擎：编排子域名枚举 → DNS 解析 → 端口扫描 → 指纹识别 → 泄漏/POC/截图 的完整闭环。
+type Engine struct {
+	store *Store
+	opts  ScanOptions
+}
+
+// NewEngine 构造侦察引擎。
+func NewEngine(store *Store, opts ScanOptions) *Engine {
+	if opts.Concurrency <= 0 {
+		opts.Concurrency = 100
+	}
+	if opts.Timeout <= 0 {
+		opts.Timeout = 5 * time.Second
+	}
+	return &Engine{store: store, opts: opts}
+}
+
+// ProgressFunc 进度回调，用于实时上报（GUI / CLI）。progress 为 0-100 的百分比。
+type ProgressFunc func(stage string, detail string, progress int)
+
+// ScanTarget 按目标类型分发到域名或 IP 侦察流程。taskID 为空表示不关联任务（如 CLI）。
+func (e *Engine) ScanTarget(ctx context.Context, target string, typ TaskType, taskID string, progress ProgressFunc) error {
+	switch typ {
+	case TaskIP:
+		return e.ScanIPs(ctx, target, taskID, progress)
+	default:
+		return e.ScanDomain(ctx, target, taskID, progress)
+	}
+}
+
+// ScanDomain 执行域名侦察完整流程。
+func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, progress ProgressFunc) error {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	domain = strings.TrimPrefix(domain, "http://")
+	domain = strings.TrimPrefix(domain, "https://")
+	domain = strings.TrimSuffix(domain, "/")
+	if domain == "" {
+		return fmt.Errorf("目标域名不能为空")
+	}
+
+	report := func(stage, detail string, pct int) {
+		if progress != nil {
+			progress(stage, detail, pct)
+		}
+	}
+
+	// 1. 记录根域名。
+	if err := e.store.UpsertDomain(Domain{ID: newID(), Domain: domain, Source: "manual", CreatedAt: nowUnix()}); err != nil {
+		return err
+	}
+	report("初始化", "记录根域名", 2)
+
+	subs := map[string]bool{domain: true}
+
+	// 2. 子域名爆破（ksubdomain 无状态爆破，失败时降级为纯 Go 字典爆破）。
+	if e.opts.SubdomainBrute {
+		report("子域名枚举", "无状态爆破 ...", 5)
+		for _, s := range enumerateSubdomains(ctx, domain, e.opts) {
+			subs[s] = true
+		}
+	}
+
+	all := keysOf(subs)
+	sort.Strings(all)
+	report("子域名枚举", fmt.Sprintf("共发现 %d 个子域名", len(all)), 20)
+
+	// 4. DNS 解析。
+	report("DNS 解析", "解析 A 记录 ...", 22)
+	resolved := resolveBatch(ctx, all, e.opts.Concurrency, e.opts.Timeout)
+
+	ipHosts := map[string][]string{} // ip -> 关联域名
+	for _, host := range all {
+		ips := resolved[host]
+		if len(ips) == 0 {
+			continue
+		}
+		sd := Subdomain{
+			ID:        newID(),
+			Domain:    domain,
+			Subdomain: host,
+			IP:        ips[0],
+			Source:    "resolved",
+			TaskID:    taskID,
+			CreatedAt: nowUnix(),
+		}
+		_ = e.store.UpsertSubdomain(sd)
+		for _, ip := range ips {
+			ipHosts[ip] = appendUnique(ipHosts[ip], host)
+		}
+	}
+
+	ips := keysOfSlice(ipHosts)
+	sort.Strings(ips)
+	report("DNS 解析", fmt.Sprintf("解析到 %d 个存活子域名 / %d 个独立 IP", len(resolved), len(ips)), 30)
+
+	// 5. 端口扫描 + 服务识别 + 指纹，收集站点供附加模块使用。（进度 30-90）
+	sites := e.scanPortsAndSites(ctx, ips, ipHosts, taskID, report, 30, 60)
+
+	// 6. 附加模块：文件泄漏 / POC / 截图。（进度 90-99）
+	e.postProcess(ctx, sites, taskID, report, 90)
+
+	return nil
+}
+
+// ScanIPs 对 IP 或 CIDR 网段执行端口扫描流程。
+func (e *Engine) ScanIPs(ctx context.Context, target string, taskID string, progress ProgressFunc) error {
+	ips, err := expandTarget(target)
+	if err != nil {
+		return err
+	}
+	report := func(stage, detail string, pct int) {
+		if progress != nil {
+			progress(stage, detail, pct)
+		}
+	}
+	report("端口扫描", fmt.Sprintf("目标 %d 个 IP (模式: %s) ...", len(ips), e.opts.PortMode), 1)
+
+	sites := e.scanPortsAndSites(ctx, ips, nil, taskID, report, 0, 90)
+	e.postProcess(ctx, sites, taskID, report, 90)
+	return nil
+}
+
+// scanPortsAndSites 对一组 IP 做端口扫描 + 服务识别 + 指纹，返回去重后的站点列表。
+// base/span 为进度区间（如 base=30, span=60 表示进度从 30% 推进到 90%）。
+func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, ipHosts map[string][]string, taskID string, report ProgressFunc, base int, span int) []Site {
+	ports := portList(e.opts.PortMode)
+	siteMap := map[string]Site{}
+
+	for i, ip := range ips {
+		hostname := ""
+		if ipHosts != nil {
+			if hosts := ipHosts[ip]; len(hosts) > 0 {
+				hostname = hosts[0]
+			}
+		}
+		open := scanIPPorts(ctx, ip, ports, e.opts.Concurrency, e.opts.Timeout)
+		for _, p := range open {
+			service, banner := grabBanner(ctx, ip, p, e.opts.Timeout)
+			rec := Port{
+				ID:        newID(),
+				IP:        ip,
+				Port:      p,
+				Protocol:  "tcp",
+				Service:   service,
+				Banner:    strings.TrimSpace(banner),
+				TaskID:    taskID,
+				CreatedAt: nowUnix(),
+			}
+			if site, ok := probeWebSite(ctx, ip, p, service, hostname, e.opts.Timeout); ok {
+				site.TaskID = taskID
+				rec.Title = site.Title
+				siteMap[site.URL] = site
+				_ = e.store.UpsertSite(site)
+			}
+			_ = e.store.UpsertPort(rec)
+		}
+		pct := base
+		if len(ips) > 0 {
+			pct = base + (i+1)*span/len(ips)
+		}
+		report("端口扫描", fmt.Sprintf("[%d/%d] %s 开放 %d 端口", i+1, len(ips), ip, len(open)), pct)
+	}
+
+	sites := make([]Site, 0, len(siteMap))
+	for _, s := range siteMap {
+		sites = append(sites, s)
+	}
+	return sites
+}
+
+// postProcess 执行文件泄漏 / POC / 截图等附加模块。base 为起始进度（百分比）。
+func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, report ProgressFunc, base int) {
+	if len(sites) == 0 {
+		return
+	}
+	pct := base
+
+	if e.opts.FileLeak {
+		report("文件泄漏检测", fmt.Sprintf("探测 %d 个站点", len(sites)), pct)
+		rules := leakRules
+		if e.opts.LeakDictPath != "" {
+			if custom, err := loadLeakDict(e.opts.LeakDictPath); err == nil && len(custom) > 0 {
+				rules = custom
+				report("文件泄漏检测", fmt.Sprintf("加载自定义字典 %d 条", len(custom)), pct)
+			} else if err != nil {
+				report("文件泄漏检测", "加载自定义字典失败，改用内置字典: "+err.Error(), pct)
+			}
+		}
+		for _, site := range sites {
+			for _, leak := range detectLeaks(ctx, site, taskID, e.opts.Timeout, rules) {
+				_ = e.store.UpsertLeak(leak)
+			}
+		}
+		pct += 3
+		report("文件泄漏检测", "完成", pct)
+	}
+	if e.opts.Nuclei {
+		report("POC 检测", fmt.Sprintf("检测 %d 个站点", len(sites)), pct)
+		for _, site := range sites {
+			for _, leak := range runNuclei(ctx, site, taskID, e.opts.Timeout) {
+				_ = e.store.UpsertLeak(leak)
+			}
+		}
+		// 自定义 nuclei 模板目录。
+		if e.opts.NucleiTemplatesDir != "" {
+			if templates, err := loadNucleiTemplates(e.opts.NucleiTemplatesDir); err == nil && len(templates) > 0 {
+				report("POC 检测", fmt.Sprintf("加载 %d 个自定义模板", len(templates)), pct)
+				for _, site := range sites {
+					for _, leak := range runNucleiYAML(ctx, site, taskID, templates, e.opts.Timeout) {
+						_ = e.store.UpsertLeak(leak)
+					}
+				}
+			} else if err != nil {
+				report("POC 检测", "加载模板目录失败: "+err.Error(), pct)
+			}
+		}
+		pct += 3
+		report("POC 检测", "完成", pct)
+	}
+	if e.opts.Screenshot {
+		report("站点截图", fmt.Sprintf("截图 %d 个站点", len(sites)), pct)
+		shot, err := NewScreenshotter(e.opts.ChromePath, e.opts.ScreenshotDir)
+		if err != nil {
+			report("站点截图", "截图器初始化失败: "+err.Error(), pct)
+			return
+		}
+		defer shot.Close()
+		for _, site := range sites {
+			saved := false
+			for _, u := range ScreenshotCandidates(site.URL) {
+				if path, err := shot.Capture(u); err == nil {
+					_ = e.store.SetSiteScreenshot(site.URL, path)
+					saved = true
+					break
+				}
+			}
+			if !saved {
+				report("站点截图", fmt.Sprintf("截图失败 %s", site.URL), pct)
+			}
+		}
+		pct += 3
+		report("站点截图", "完成", pct)
+	}
+}
+
+// probeWebSite 判断端口是否为 Web 服务并探测指纹；非 Web 返回 ok=false。
+func probeWebSite(ctx context.Context, ip string, port int, service string, hostname string, timeout time.Duration) (Site, bool) {
+	schemes := webSchemes(port, service)
+	for _, scheme := range schemes {
+		if site, ok := probeSite(ctx, ip, port, scheme, hostname, timeout); ok {
+			return site, true
+		}
+	}
+	return Site{}, false
+}
+
+// webSchemes 依据端口/服务确定要尝试的协议。
+func webSchemes(port int, service string) []string {
+	switch {
+	case service == "https", port == 443, port == 8443, port == 9443:
+		return []string{"https"}
+	case service == "http":
+		return []string{"http"}
+	case isWebPort(port):
+		return []string{"http", "https"}
+	default:
+		return nil
+	}
+}
+
+func isWebPort(port int) bool {
+	switch port {
+	case 80, 81, 300, 443, 800, 808, 3000, 5000, 7001, 8000, 8001, 8008, 8009, 8080,
+		8081, 8082, 8088, 8090, 8181, 8443, 8888, 9000, 9080, 9090, 9100, 9200, 9443:
+		return true
+	default:
+		return false
+	}
+}
+
+// IsIPTarget 判断目标是否为 IP 或 CIDR 网段。
+func IsIPTarget(target string) bool {
+	t := strings.TrimSpace(target)
+	if net.ParseIP(t) != nil {
+		return true
+	}
+	if _, _, err := net.ParseCIDR(t); err == nil {
+		return true
+	}
+	return false
+}
+
+// expandTarget 将单个 IP 或 CIDR 展开为 IP 列表。
+func expandTarget(target string) ([]string, error) {
+	target = strings.TrimSpace(target)
+	if ip := net.ParseIP(target); ip != nil {
+		return []string{ip.String()}, nil
+	}
+	_, ipnet, err := net.ParseCIDR(target)
+	if err != nil {
+		return nil, fmt.Errorf("无效的 IP 或网段: %s", target)
+	}
+	var out []string
+	for ip := ipnet.IP.Mask(ipnet.Mask); ipnet.Contains(ip); incIP(ip) {
+		out = append(out, ip.String())
+	}
+	return out, nil
+}
+
+func incIP(ip net.IP) {
+	for i := len(ip) - 1; i >= 0; i-- {
+		ip[i]++
+		if ip[i] != 0 {
+			break
+		}
+	}
+}
+
+func keysOf(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+func keysOfSlice(m map[string][]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
+}
+
+func appendUnique(s []string, v string) []string {
+	for _, x := range s {
+		if x == v {
+			return s
+		}
+	}
+	return append(s, v)
+}

@@ -1,0 +1,104 @@
+package core
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestConfigRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	cfg := DefaultConfig()
+	cfg.FileLeak.DictPath = "/tmp/my-leak-dict.txt"
+	cfg.Nuclei.TemplatesDir = "/tmp/my-templates"
+	cfg.Scan.Concurrency = 250
+	if err := cfg.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	loaded, err := LoadConfig(path)
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if loaded.FileLeak.DictPath != "/tmp/my-leak-dict.txt" {
+		t.Fatalf("DictPath = %q", loaded.FileLeak.DictPath)
+	}
+	if loaded.Nuclei.TemplatesDir != "/tmp/my-templates" {
+		t.Fatalf("TemplatesDir = %q", loaded.Nuclei.TemplatesDir)
+	}
+	if loaded.Scan.Concurrency != 250 {
+		t.Fatalf("Concurrency = %d", loaded.Scan.Concurrency)
+	}
+
+	// 不存在的文件返回默认配置。
+	def, err := LoadConfig(filepath.Join(dir, "nope.yaml"))
+	if err != nil || def.Scan.Concurrency != 100 {
+		t.Fatalf("LoadConfig(nonexistent) = %+v err=%v", def, err)
+	}
+}
+
+func TestLoadLeakDict(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dict.txt")
+	content := "# 自定义泄漏字典\n/.git/config git\n/.env\n/backup.zip backup\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rules, err := loadLeakDict(path)
+	if err != nil {
+		t.Fatalf("loadLeakDict: %v", err)
+	}
+	if len(rules) != 3 {
+		t.Fatalf("len(rules) = %d; want 3", len(rules))
+	}
+	if rules[0].Type != "git" || rules[1].Type != "env" || rules[2].Type != "backup" {
+		t.Fatalf("rules = %+v", rules)
+	}
+}
+
+func TestNucleiYAMLTemplates(t *testing.T) {
+	// 构造一个 nuclei 风格 YAML 模板。
+	dir := t.TempDir()
+	tpl := `id: test-actuator
+info:
+  name: "Test Actuator Exposure"
+  severity: medium
+requests:
+  - method: GET
+    path:
+      - "{{BaseURL}}/actuator/env"
+    matchers-condition: and
+    matchers:
+      - type: word
+        words:
+          - "propertySources"
+        part: body
+`
+	if err := os.WriteFile(filepath.Join(dir, "test.yaml"), []byte(tpl), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/actuator/env", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"propertySources":[{"name":"x"}]}`))
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	templates, err := loadNucleiTemplates(dir)
+	if err != nil || len(templates) != 1 {
+		t.Fatalf("loadNucleiTemplates = %d err=%v", len(templates), err)
+	}
+
+	leaks := runNucleiYAML(context.Background(), Site{URL: srv.URL}, "task1", templates, 2*time.Second)
+	if !hasLeakType(leaks, "nuclei:Test Actuator Exposure") {
+		t.Fatalf("自定义 nuclei 模板未命中: %+v", leaks)
+	}
+}

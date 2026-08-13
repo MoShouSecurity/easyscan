@@ -72,7 +72,7 @@ func TestOpenStoreAndRoundtrip(t *testing.T) {
 
 func TestPortList(t *testing.T) {
 	cases := map[string]int{
-		"test":    6,
+		"test":    5,
 		"top100":  100,
 		"top1000": 996,
 		"all":     65535,

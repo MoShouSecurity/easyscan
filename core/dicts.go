@@ -14,7 +14,7 @@ func portList(mode string) []int {
 	case "top1000":
 		return parseInts(top1000Ports)
 	case "test":
-		return []int{22, 80, 443, 3306, 6379, 8080}
+		return []int{22, 80, 8080, 3389, 445}
 	default: // top100
 		return parseInts(top100Ports)
 	}

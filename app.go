@@ -77,6 +77,7 @@ type ScanRequest struct {
 	Type       string `json:"type"`      // domain / ip
 	PortMode   string `json:"port_mode"` // test / top100 / top1000 / all
 	Brute      bool   `json:"brute"`
+	NoPing     bool   `json:"no_ping"`
 	Nuclei     bool   `json:"nuclei"`
 	FileLeak   bool   `json:"file_leak"`
 	Screenshot bool   `json:"screenshot"`
@@ -92,6 +93,7 @@ func (a *App) StartScan(req ScanRequest) (string, error) {
 		opts.PortMode = req.PortMode
 	}
 	opts.SubdomainBrute = req.Brute
+	opts.NoPing = req.NoPing
 	opts.Nuclei = req.Nuclei
 	opts.FileLeak = req.FileLeak
 	opts.Screenshot = req.Screenshot

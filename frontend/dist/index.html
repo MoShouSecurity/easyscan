@@ -119,6 +119,7 @@
     <select id="mPort"><option value="test">测试（6端口）</option><option value="top100">Top 100</option><option value="top1000" selected>Top 1000</option><option value="all">全部端口</option></select>
     <div class="opts">
       <div class="check"><input type="checkbox" id="mBrute" checked /><span>子域名爆破</span></div>
+      <div class="check"><input type="checkbox" id="mNoPing" /><span>目标禁 ping（跳过存活确认）</span></div>
       <div class="check"><input type="checkbox" id="mNuclei" /><span>nuclei POC 检测</span></div>
       <div class="check"><input type="checkbox" id="mLeak" /><span>文件泄漏检测</span></div>
       <div class="check"><input type="checkbox" id="mShot" checked /><span>站点截图</span></div>
@@ -323,8 +324,8 @@ function renderIPsHTML(aliveIPs, ports) {
 
 function renderPortsHTML(ports) {
   if (!ports.length) return '<div class="empty">无开放端口</div>';
-  return `<table><thead><tr><th>IP</th><th>端口</th><th>协议</th><th>服务</th><th>标题</th></tr></thead><tbody>` +
-    ports.map(p => `<tr><td>${esc(p.ip)}</td><td>${p.port}</td><td>${esc(p.protocol)}</td><td class="tag">${esc(p.service)}</td><td style="color:var(--muted)">${esc(p.title)}</td></tr>`).join('') + '</tbody></table>';
+  return `<table><thead><tr><th>IP</th><th>端口</th><th>协议</th><th>服务</th><th>产品/版本</th><th>标题</th></tr></thead><tbody>` +
+    ports.map(p => `<tr><td>${esc(p.ip)}</td><td>${p.port}</td><td>${esc(p.protocol)}</td><td class="tag">${esc(p.service)}</td><td>${p.product ? esc(p.product) + (p.version ? ' ' + esc(p.version) : '') : '-'}</td><td style="color:var(--muted)">${esc(p.title)}</td></tr>`).join('') + '</tbody></table>';
 }
 
 function renderLeaksHTML(leaks) {
@@ -386,6 +387,7 @@ async function submitTask() {
       type: '', // 空则后端自动判断域名/IP
       port_mode: document.getElementById('mPort').value,
       brute: document.getElementById('mBrute').checked,
+      no_ping: document.getElementById('mNoPing').checked,
       nuclei: document.getElementById('mNuclei').checked,
       file_leak: document.getElementById('mLeak').checked,
       screenshot: document.getElementById('mShot').checked,

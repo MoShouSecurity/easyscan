@@ -131,17 +131,71 @@ func (e *Engine) ScanIPs(ctx context.Context, target string, taskID string, prog
 	return nil
 }
 
-// scanPortsAndSites 对一组 IP 做端口扫描 + 服务识别 + 指纹，返回去重后的站点列表。
+// scanPortsAndSites 对一组 IP 做 IP 存活确认 + 端口扫描 + 服务识别 + 指纹，返回去重后的站点列表。
 // base/span 为进度区间（如 base=30, span=60 表示进度从 30% 推进到 90%）。
+// 优先用 nmap（-sn 存活确认 + -sV 服务/版本识别），不可用/失败时降级纯 Go 扫描。
 func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, ipHosts map[string][]string, taskID string, report ProgressFunc, base int, span int) []Site {
-	ports := portList(e.opts.PortMode)
 	siteMap := map[string]Site{}
+	nmap := NewNmapScanner()
 
-	for i, ip := range ips {
+	// 1. IP 存活确认（nmap -sn 综合 ICMP/TCP/ARP 探测；目标禁 ping 时跳过直接扫描）。
+	alive := ips
+	if !e.opts.NoPing && nmap.Available() {
+		report("IP存活确认", fmt.Sprintf("ping 探测 %d 个 IP ...", len(ips)), base)
+		alive = nmap.PingSweep(ctx, ips)
+		report("IP存活确认", fmt.Sprintf("%d/%d 个 IP 存活", len(alive), len(ips)), base+span/10)
+	} else if e.opts.NoPing {
+		report("IP存活确认", "目标禁 ping，跳过存活确认直接扫描", base)
+	}
+
+	// 2. nmap 端口扫描 + 服务/版本识别。
+	if nmap.Available() {
+		report("端口扫描", fmt.Sprintf("nmap 服务识别 %d 个存活 IP (模式: %s) ...", len(alive), e.opts.PortMode), base+span/10)
+		hosts, err := nmap.Scan(ctx, alive, e.opts.PortMode)
+		if err == nil {
+			for _, h := range hosts {
+				hostname := ""
+				if ipHosts != nil {
+					if hs := ipHosts[h.IP]; len(hs) > 0 {
+						hostname = hs[0]
+					}
+				}
+				for _, p := range h.Ports {
+					rec := Port{
+						ID:        newID(),
+						IP:        h.IP,
+						Port:      p.Port,
+						Protocol:  p.Protocol,
+						Service:   p.Service,
+						Product:   p.Product,
+						Version:   p.Version,
+						Title:     p.Title,
+						TaskID:    taskID,
+						CreatedAt: nowUnix(),
+					}
+					// Web 站点走指纹流程，获取标题与 CMS。
+					if site, ok := probeWebSite(ctx, h.IP, p.Port, p.Service, hostname, e.opts.Timeout); ok {
+						site.TaskID = taskID
+						rec.Title = site.Title
+						siteMap[site.URL] = site
+						_ = e.store.UpsertSite(site)
+					}
+					_ = e.store.UpsertPort(rec)
+				}
+			}
+			report("端口扫描", fmt.Sprintf("nmap 扫描完成，识别 %d 个 IP", len(hosts)), base+span)
+			return mapToSites(siteMap)
+		}
+		report("端口扫描", "nmap 扫描失败，降级纯 Go 扫描: "+err.Error(), base+span/10)
+	}
+
+	// 3. 纯 Go fallback。
+	ports := portList(e.opts.PortMode)
+	for i, ip := range alive {
 		hostname := ""
 		if ipHosts != nil {
-			if hosts := ipHosts[ip]; len(hosts) > 0 {
-				hostname = hosts[0]
+			if hs := ipHosts[ip]; len(hs) > 0 {
+				hostname = hs[0]
 			}
 		}
 		open := scanIPPorts(ctx, ip, ports, e.opts.Concurrency, e.opts.Timeout)
@@ -166,12 +220,16 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, ipHosts ma
 			_ = e.store.UpsertPort(rec)
 		}
 		pct := base
-		if len(ips) > 0 {
-			pct = base + (i+1)*span/len(ips)
+		if len(alive) > 0 {
+			pct = base + (i+1)*span/len(alive)
 		}
-		report("端口扫描", fmt.Sprintf("[%d/%d] %s 开放 %d 端口", i+1, len(ips), ip, len(open)), pct)
+		report("端口扫描", fmt.Sprintf("[%d/%d] %s 开放 %d 端口", i+1, len(alive), ip, len(open)), pct)
 	}
 
+	return mapToSites(siteMap)
+}
+
+func mapToSites(siteMap map[string]Site) []Site {
 	sites := make([]Site, 0, len(siteMap))
 	for _, s := range siteMap {
 		sites = append(sites, s)

@@ -61,6 +61,8 @@ type Port struct {
 	Port      int    `json:"port"`
 	Protocol  string `json:"protocol"` // tcp / udp
 	Service   string `json:"service"`
+	Product   string `json:"product"` // 产品名，如 nginx / MySQL
+	Version   string `json:"version"` // 版本号，如 1.18.0 / 5.7.32
 	Banner    string `json:"banner"`
 	Title     string `json:"title"`
 	TaskID    string `json:"task_id"`

@@ -12,6 +12,8 @@ import (
 type ScanOptions struct {
 	// PortMode 端口扫描模式：test / top100 / top1000 / all。
 	PortMode string `json:"port_mode"`
+	// NoPing 目标禁 ping 时勾选，跳过存活确认直接用 nmap -Pn 扫描所有 IP。
+	NoPing bool `json:"no_ping"`
 	// SubdomainBrute 是否开启子域名字典爆破（ksubdomain 无状态爆破）。
 	SubdomainBrute bool `json:"subdomain_brute"`
 	// Nuclei 是否执行 POC 检测。

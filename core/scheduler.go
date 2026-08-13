@@ -14,6 +14,8 @@ type Scheduler struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+	mu     sync.Mutex
+	tasks  map[string]context.CancelFunc // taskID -> cancel，支持单任务暂停
 }
 
 // NewScheduler 构造调度器。workers 为并发 worker 数。
@@ -29,6 +31,7 @@ func NewScheduler(store *Store, opts ScanOptions, workers int) *Scheduler {
 		ctx:    ctx,
 		cancel: cancel,
 		wg:     sync.WaitGroup{},
+		tasks:  make(map[string]context.CancelFunc),
 	}
 }
 
@@ -67,6 +70,21 @@ func (s *Scheduler) Submit(target string, typ TaskType, opts ScanOptions) (*Task
 	return t, nil
 }
 
+// Resume 重新入队执行任务（用于恢复暂停的任务）。
+func (s *Scheduler) Resume(t *Task) {
+	s.queue <- t
+}
+
+// CancelTask 取消指定任务（暂停用）。
+func (s *Scheduler) CancelTask(taskID string) {
+	s.mu.Lock()
+	cancel := s.tasks[taskID]
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 func (s *Scheduler) worker() {
 	defer s.wg.Done()
 	for {
@@ -86,6 +104,18 @@ func (s *Scheduler) run(t *Task) {
 		opts = s.opts
 	}
 
+	// 每个任务独立 context，支持单独取消（暂停）。
+	ctx, cancel := context.WithCancel(s.ctx)
+	s.mu.Lock()
+	s.tasks[t.ID] = cancel
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.tasks, t.ID)
+		s.mu.Unlock()
+		cancel()
+	}()
+
 	engine := NewEngine(s.store, opts)
 	update := func(status TaskStatus, progress int, msg string) {
 		t.Status = status
@@ -99,11 +129,14 @@ func (s *Scheduler) run(t *Task) {
 
 	update(TaskRunning, 0, "任务启动")
 
-	err := engine.ScanTarget(s.ctx, t.Target, t.Type, t.ID, func(stage, detail string, progress int) {
+	err := engine.ScanTarget(ctx, t.Target, t.Type, t.ID, func(stage, detail string, progress int) {
 		update(TaskRunning, progress, stage+": "+detail)
 	})
 
 	if err != nil {
+		if ctx.Err() != nil {
+			return // 被暂停取消，状态由 PauseTask 处理
+		}
 		update(TaskFailed, 100, err.Error())
 		return
 	}

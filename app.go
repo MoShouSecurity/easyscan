@@ -205,6 +205,39 @@ func (a *App) RescanTask(id string) (string, error) {
 	return task.ID, nil
 }
 
+// PauseTask 中止任务（暂停扫描）。
+func (a *App) PauseTask(id string) error {
+	if a.sched == nil {
+		return fmt.Errorf("调度器未初始化")
+	}
+	a.sched.CancelTask(id)
+	t, err := a.store.GetTask(id)
+	if err != nil {
+		return err
+	}
+	t.Status = core.TaskPaused
+	t.Message = "已暂停"
+	return a.store.UpdateTask(t)
+}
+
+// ResumeTask 恢复暂停的任务（复用原参数继续扫描）。
+func (a *App) ResumeTask(id string) error {
+	if a.sched == nil {
+		return fmt.Errorf("调度器未初始化")
+	}
+	t, err := a.store.GetTask(id)
+	if err != nil {
+		return err
+	}
+	t.Status = core.TaskPending
+	t.Message = "恢复中"
+	if err := a.store.UpdateTask(t); err != nil {
+		return err
+	}
+	a.sched.Resume(t)
+	return nil
+}
+
 // ---- 资产全局查询 ----
 
 func (a *App) ListDomains() ([]core.Domain, error) {

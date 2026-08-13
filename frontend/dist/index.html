@@ -201,6 +201,18 @@
   </div>
 </div>
 
+<!-- 关闭确认模态框 -->
+<div class="modal-mask" id="closeModal">
+  <div class="modal" style="width:380px">
+    <h2>任务进行中</h2>
+    <p style="color:var(--muted);margin-bottom:8px;line-height:1.6">还有任务正在进行，关闭软件将中断这些任务。<br>确定要退出吗？</p>
+    <div class="actions">
+      <button class="ghost" onclick="cancelClose()">取消</button>
+      <button class="primary" style="background:linear-gradient(135deg,var(--err),#B93A4C)" onclick="confirmClose()">仍要退出</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -557,6 +569,18 @@ async function poll() {
     }
   }
 }
+
+function cancelClose() {
+  document.getElementById('closeModal').classList.remove('show');
+}
+async function confirmClose() {
+  document.getElementById('closeModal').classList.remove('show');
+  try { await go.ForceClose(); } catch(e) {}
+  window.runtime.Quit();
+}
+window.runtime.EventsOn("close:confirm", () => {
+  document.getElementById('closeModal').classList.add('show');
+});
 
 renderHome();
 setInterval(poll, 2500);

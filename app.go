@@ -13,6 +13,8 @@ import (
 	"runtime"
 
 	"easyscan/core"
+
+	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 // App 是暴露给前端的后端桥接层，封装核心引擎的启动、任务提交与资产查询。
@@ -23,6 +25,7 @@ type App struct {
 	configDir  string
 	configPath string
 	config     core.Config
+	forceClose bool
 }
 
 // NewApp 构造 App（尚未初始化 store，等待 OnStartup）。
@@ -69,6 +72,39 @@ func (a *App) shutdown(_ context.Context) {
 	if a.store != nil {
 		_ = a.store.Close()
 	}
+}
+
+// beforeClose 窗口关闭前回调：有运行中任务时阻止关闭并提醒前端。
+func (a *App) beforeClose(ctx context.Context) bool {
+	if a.forceClose {
+		return false
+	}
+	if a.hasRunningTasks() {
+		wruntime.EventsEmit(ctx, "close:confirm")
+		return true // 阻止关闭
+	}
+	return false
+}
+
+func (a *App) hasRunningTasks() bool {
+	if a.store == nil {
+		return false
+	}
+	tasks, err := a.store.ListTasks(200)
+	if err != nil {
+		return false
+	}
+	for _, t := range tasks {
+		if t.Status == core.TaskRunning || t.Status == core.TaskPending {
+			return true
+		}
+	}
+	return false
+}
+
+// ForceClose 用户确认关闭后调用，标记允许退出。
+func (a *App) ForceClose() {
+	a.forceClose = true
 }
 
 // ScanRequest 新建任务的请求参数。

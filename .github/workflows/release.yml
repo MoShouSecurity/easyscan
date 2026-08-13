@@ -18,18 +18,23 @@ jobs:
           - os: macos-latest
             platform: darwin/amd64
             artifact: easyscan-darwin-amd64
+            tags: ""
           - os: macos-latest
             platform: darwin/arm64
             artifact: easyscan-darwin-arm64
+            tags: ""
           - os: windows-latest
             platform: windows/amd64
             artifact: easyscan-windows-amd64
+            tags: ""
           - os: windows-latest
             platform: windows/arm64
             artifact: easyscan-windows-arm64
+            tags: ""
           - os: ubuntu-latest
             platform: linux/amd64
             artifact: easyscan-linux-amd64
+            tags: "webkit2_41"
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -51,7 +56,13 @@ jobs:
         run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.14.0
 
       - name: Build (${{ matrix.platform }})
-        run: wails build -platform ${{ matrix.platform }}
+        shell: bash
+        run: |
+          if [ -n "${{ matrix.tags }}" ]; then
+            wails build -platform ${{ matrix.platform }} -tags ${{ matrix.tags }}
+          else
+            wails build -platform ${{ matrix.platform }}
+          fi
 
       - name: Rename Windows binary
         if: runner.os == 'Windows'

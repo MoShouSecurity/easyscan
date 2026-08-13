@@ -130,6 +130,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 	// 旧库平滑迁移：补充新增列（存在则忽略）。
 	for _, c := range []struct{ table, col, decl string }{
 		{"subdomains", "task_id", "TEXT DEFAULT ''"},
+		{"ips", "task_id", "TEXT DEFAULT ''"},
 		{"ports", "task_id", "TEXT DEFAULT ''"},
 		{"ports", "product", "TEXT DEFAULT ''"},
 		{"ports", "version", "TEXT DEFAULT ''"},
@@ -165,6 +166,16 @@ func (s *Store) UpsertSubdomain(sd Subdomain) error {
 		`INSERT INTO subdomains(id, domain, subdomain, ip, source, task_id, created_at) VALUES(?,?,?,?,?,?,?)
 		 ON CONFLICT(domain, subdomain) DO UPDATE SET ip=excluded.ip, task_id=excluded.task_id`,
 		sd.ID, sd.Domain, sd.Subdomain, sd.IP, sd.Source, sd.TaskID, sd.CreatedAt)
+	return err
+}
+
+func (s *Store) UpsertIP(ip IP) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(
+		`INSERT INTO ips(id, ip, domain, task_id, created_at) VALUES(?,?,?,?,?)
+		 ON CONFLICT(ip, domain) DO UPDATE SET task_id=excluded.task_id`,
+		ip.ID, ip.IP, ip.Domain, ip.TaskID, ip.CreatedAt)
 	return err
 }
 
@@ -374,6 +385,26 @@ func (s *Store) ListPorts(limit int) ([]Port, error) {
 	}
 	defer rows.Close()
 	return scanPorts(rows)
+}
+
+func (s *Store) ListIPsByTask(taskID string, limit int) ([]IP, error) {
+	if limit <= 0 {
+		limit = 5000
+	}
+	rows, err := s.db.Query(`SELECT id, ip, domain, task_id, created_at FROM ips WHERE task_id=? ORDER BY ip LIMIT ?`, taskID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]IP, 0)
+	for rows.Next() {
+		var ip IP
+		if err := rows.Scan(&ip.ID, &ip.IP, &ip.Domain, &ip.TaskID, &ip.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, ip)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) ListPortsByTask(taskID string, limit int) ([]Port, error) {

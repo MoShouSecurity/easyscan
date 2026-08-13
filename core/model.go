@@ -54,6 +54,15 @@ type Subdomain struct {
 	CreatedAt int64  `json:"created_at"`
 }
 
+// IP 存活 IP 资产（即使无开放端口也记录）。
+type IP struct {
+	ID        string `json:"id"`
+	IP        string `json:"ip"`
+	Domain    string `json:"domain"` // 关联域名，可为空
+	TaskID    string `json:"task_id"`
+	CreatedAt int64  `json:"created_at"`
+}
+
 // Port 开放端口与服务识别结果。
 type Port struct {
 	ID        string `json:"id"`

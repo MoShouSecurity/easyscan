@@ -287,19 +287,22 @@ async function openDetail(taskID) {
 
 async function renderDetail(taskID) {
   const v = document.getElementById('view');
-  let task, sites, ports, leaks, subs;
+  let task, sites, ports, leaks, subs, ips;
   try {
-    [task, sites, ports, leaks, subs] = await Promise.all([
-      go.GetTask(taskID), go.ListSitesByTask(taskID), go.ListPortsByTask(taskID), go.ListLeaksByTask(taskID), go.ListSubdomainsByTask(taskID)
+    [task, sites, ports, leaks, subs, ips] = await Promise.all([
+      go.GetTask(taskID), go.ListSitesByTask(taskID), go.ListPortsByTask(taskID), go.ListLeaksByTask(taskID), go.ListSubdomainsByTask(taskID), go.ListIPsByTask(taskID)
     ]);
   } catch(e) {
     v.innerHTML = '<div class="empty">加载详情失败: ' + esc(e) + '</div>';
     return;
   }
   if (!task) { v.innerHTML = '<div class="empty">任务不存在或已删除</div>'; return; }
-  sites = sites || []; ports = ports || []; leaks = leaks || []; subs = subs || [];
+  sites = sites || []; ports = ports || []; leaks = leaks || []; subs = subs || []; ips = ips || [];
 
-  const aliveIPs = [...new Set([...ports.map(p=>p.ip), ...subs.map(s=>s.ip)].filter(Boolean))];
+  // 存活 IP 优先用落盘的 ips，兜底从端口/子域名推导（兼容旧任务）。
+  const aliveIPs = ips.length
+    ? [...new Set(ips.map(i=>i.ip).filter(Boolean))]
+    : [...new Set([...ports.map(p=>p.ip), ...subs.map(s=>s.ip)].filter(Boolean))];
 
   // 缓存各标签页内容。
   currentSites = sites;

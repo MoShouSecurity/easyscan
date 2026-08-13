@@ -265,6 +265,14 @@ func (a *App) ListSubdomainsByTask(taskID string) ([]core.Subdomain, error) {
 	return a.store.ListSubdomainsByTask(taskID, 0)
 }
 
+// ListIPsByTask 返回任务发现的存活 IP（含无开放端口的）。
+func (a *App) ListIPsByTask(taskID string) ([]core.IP, error) {
+	if a.store == nil {
+		return nil, nil
+	}
+	return a.store.ListIPsByTask(taskID, 0)
+}
+
 // ---- 搜索 ----
 
 func (a *App) Search(query string) ([]core.SearchResult, error) {

@@ -148,6 +148,16 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, ipHosts ma
 		report("IP存活确认", "目标禁 ping，跳过存活确认直接扫描", base)
 	}
 
+	// 存活 IP 入库（即使无开放端口也记录，详情页「IP存活」显示）。
+	for _, ip := range alive {
+		_ = e.store.UpsertIP(IP{
+			ID:        newID(),
+			IP:        ip,
+			TaskID:    taskID,
+			CreatedAt: nowUnix(),
+		})
+	}
+
 	// 2. nmap 端口扫描 + 服务/版本识别。
 	if nmap.Available() {
 		report("端口扫描", fmt.Sprintf("nmap 服务识别 %d 个存活 IP (模式: %s) ...", len(alive), e.opts.PortMode), base+span/10)

@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/boy-hack/ksubdomain/v2 v2.4.0
+	github.com/chromedp/cdproto v0.0.0-20260714215040-dc233986426f
 	github.com/chromedp/chromedp v0.16.0
 	github.com/google/gopacket v1.1.19
 	github.com/projectdiscovery/subfinder/v2 v2.15.0
@@ -32,7 +33,6 @@ require (
 	github.com/charmbracelet/lipgloss v0.13.0 // indirect
 	github.com/charmbracelet/x/ansi v0.3.2 // indirect
 	github.com/cheggaaa/pb/v3 v3.1.4 // indirect
-	github.com/chromedp/cdproto v0.0.0-20260714215040-dc233986426f // indirect
 	github.com/chromedp/sysutil v1.1.0 // indirect
 	github.com/cnf/structhash v0.0.0-20250313080605-df4c6cc74a9a // indirect
 	github.com/corpix/uarand v0.2.0 // indirect

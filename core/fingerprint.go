@@ -57,22 +57,20 @@ func probeSite(ctx context.Context, ip string, port int, scheme string, hostname
 	}
 	url := fmt.Sprintf("%s://%s:%d/", scheme, host, port)
 
-	var client *http.Client
+	transport := &http.Transport{
+		// 侦察场景不校验证书链，避免自签名/过期证书阻断指纹识别（如 80 重定向到 https）。
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
 	if hostname != "" {
 		// 连 IP，但以域名作为 Host 头与 TLS SNI，正确探测虚拟主机。
-		transport := &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				_, portStr, _ := net.SplitHostPort(addr)
-				d := net.Dialer{Timeout: timeout}
-				return d.DialContext(ctx, network, net.JoinHostPort(ip, portStr))
-			},
-			// 侦察场景不校验证书链，避免自签名/过期证书阻断指纹识别。
-			TLSClientConfig: &tls.Config{ServerName: hostname, InsecureSkipVerify: true},
+		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			_, portStr, _ := net.SplitHostPort(addr)
+			d := net.Dialer{Timeout: timeout}
+			return d.DialContext(ctx, network, net.JoinHostPort(ip, portStr))
 		}
-		client = &http.Client{Transport: transport, Timeout: timeout}
-	} else {
-		client = defaultHTTPClient(timeout)
+		transport.TLSClientConfig.ServerName = hostname
 	}
+	client := &http.Client{Transport: transport, Timeout: timeout}
 	// 跟随重定向（最多 5 跳）以拿到最终页面的标题与指纹，如 http→https。
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {

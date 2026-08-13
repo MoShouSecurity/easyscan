@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chromedp/cdproto/security"
 	"github.com/chromedp/chromedp"
 )
 
@@ -74,6 +75,10 @@ func (s *Screenshotter) Capture(url string) (string, error) {
 	cctx, cancel := context.WithTimeout(tabCtx, 25*time.Second)
 	defer cancel()
 	if err := chromedp.Run(cctx,
+		// 忽略 SSL 证书错误（自签名/过期证书的站点也能截图）。
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			return security.SetIgnoreCertificateErrors(true).Do(ctx)
+		}),
 		chromedp.Navigate(url),
 		chromedp.Sleep(1500*time.Millisecond),
 		chromedp.CaptureScreenshot(&buf),

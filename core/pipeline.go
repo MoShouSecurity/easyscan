@@ -113,6 +113,10 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, s
 		}
 	}
 
+	if ctx.Err() != nil {
+		return ctx.Err() // 被暂停取消
+	}
+
 	all := keysOf(subs)
 	sort.Strings(all)
 
@@ -151,6 +155,10 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, s
 		}
 	}
 
+	if ctx.Err() != nil {
+		return ctx.Err() // 被暂停取消
+	}
+
 	ips := keysOfSlice(ipHosts)
 	sort.Strings(ips)
 
@@ -161,6 +169,10 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, s
 		sites = e.scanPortsAndSites(ctx, ips, ipHosts, taskID, report, 30, 60)
 	} else {
 		sites, _ = e.store.ListSitesByTask(taskID, 0)
+	}
+
+	if ctx.Err() != nil {
+		return ctx.Err() // 被暂停取消
 	}
 
 	// 5. 附加模块：文件泄漏 / POC / 截图。
@@ -191,6 +203,10 @@ func (e *Engine) ScanIPs(ctx context.Context, target string, taskID string, star
 		sites = e.scanPortsAndSites(ctx, ips, nil, taskID, report, 0, 90)
 	} else {
 		sites, _ = e.store.ListSitesByTask(taskID, 0)
+	}
+
+	if ctx.Err() != nil {
+		return ctx.Err() // 被暂停取消
 	}
 
 	if stageIndex(startStage) <= stageIndex(StagePostProcess) {

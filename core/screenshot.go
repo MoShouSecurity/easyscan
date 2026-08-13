@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -26,9 +25,10 @@ type Screenshotter struct {
 
 // NewScreenshotter 构造截图器。chromePath 为空时由 chromedp 自动探测 Chrome。
 func NewScreenshotter(chromePath, dir string) (*Screenshotter, error) {
-	// 启动前检查屏幕录制权限（macOS 需要，其余平台恒通过）。
+	// CGPreflightScreenCaptureAccess 在 macOS 13+ 有误报（已授权也可能返回 false），
+	// 因此不据此阻断截图，仅打印提示；真正失败会在 Capture 时暴露。
 	if !hasScreenCapturePermission() {
-		return nil, fmt.Errorf("缺少屏幕录制权限，请到 系统设置 → 隐私与安全性 → 屏幕录制 中授权 Easy Scan 后重试")
+		println("提示: 屏幕录制权限预检未通过，若截图失败请到 系统设置 → 隐私与安全性 → 屏幕录制 中授权")
 	}
 
 	opts := []chromedp.ExecAllocatorOption{

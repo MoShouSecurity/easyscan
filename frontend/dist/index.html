@@ -309,7 +309,7 @@ function renderSitesHTML(sites) {
     <div class="site-card">
       <div class="thumb" id="thumb-${esc(s.id)}"><span class="ph">无截图</span></div>
       <div class="meta">
-        <div class="url">${esc(s.url)}</div>
+        <div class="url" style="cursor:pointer" title="点击用浏览器打开" onclick="openURL('${esc(s.url)}')">${esc(s.url)}</div>
         <div class="title">${esc(s.title) || '（无标题）'}</div>
         <div class="fp">${esc(s.fingerprint)||'—'} · ${esc(s.server)||''} · HTTP ${s.status_code||'?'}</div>
       </div>
@@ -471,6 +471,13 @@ function setTopbar(view) {
   document.getElementById('exportBtn').style.display = (view === 'detail') ? '' : 'none';
 }
 function goHome() { renderHome(); }
+function openURL(url) {
+  try {
+    window.runtime.BrowserOpenURL(url);
+  } catch(e) {
+    toast('打开浏览器失败: ' + e, true);
+  }
+}
 async function rescanTask(id) {
   try {
     await go.RescanTask(id);

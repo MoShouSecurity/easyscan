@@ -67,13 +67,27 @@ func (s *Scheduler) Submit(target string, typ TaskType, opts ScanOptions) (*Task
 	if err := s.store.CreateTask(t); err != nil {
 		return nil, err
 	}
-	s.queue <- t
-	return t, nil
+	// 队列满时非阻塞返回错误，避免 Wails 主线程永久挂起（UI 冻结）。
+	select {
+	case s.queue <- t:
+		return t, nil
+	default:
+		t.Status = TaskFailed
+		t.Message = "任务队列已满，请稍后重试"
+		t.FinishedAt = nowUnix()
+		_ = s.store.UpdateTask(t)
+		return nil, fmt.Errorf("任务队列已满，请稍后重试")
+	}
 }
 
-// Resume 重新入队执行任务（用于恢复暂停的任务）。
-func (s *Scheduler) Resume(t *Task) {
-	s.queue <- t
+// Resume 重新入队执行任务（用于恢复暂停的任务）。队列满时返回错误。
+func (s *Scheduler) Resume(t *Task) error {
+	select {
+	case s.queue <- t:
+		return nil
+	default:
+		return fmt.Errorf("任务队列已满，请稍后重试")
+	}
 }
 
 // CancelTask 取消指定任务（暂停用）。

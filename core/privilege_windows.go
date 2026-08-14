@@ -45,7 +45,10 @@ func enumerateWithKsubdomainPrivileged(domain string) ([]string, error) {
 	_ = tmp.Close()
 	defer os.Remove(tmpPath)
 
-	params := fmt.Sprintf(`--ksubdomain-enum %s --ksubdomain-out "%s"`, domain, tmpPath)
+	// domain 已在上层白名单校验（S-01），此处再转义引号做纵深防御：
+	// Windows 子进程用 CommandLineToArgvW 重新拆分参数，含引号的域名可注入额外 argv。
+	domainArg := strings.ReplaceAll(domain, `"`, `\"`)
+	params := fmt.Sprintf(`--ksubdomain-enum %s --ksubdomain-out "%s"`, domainArg, tmpPath)
 	proc, err := shellExecuteRunas(exe, params)
 	if err != nil {
 		return nil, err

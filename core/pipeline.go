@@ -587,6 +587,10 @@ func splitTargets(target string) ([]string, error) {
 	return out, nil
 }
 
+// maxExpandTargetIPs 单任务展开的 IP 数上限（/16 网段），
+// 防 /8 等超大网段一次物化上千万 IP 造成自拒绝服务。
+const maxExpandTargetIPs = 65536
+
 // expandTarget 将单个或多个 IP/CIDR 展开为 IP 列表（纯 Go 扫描使用）。
 func expandTarget(target string) ([]string, error) {
 	parts, err := splitTargets(target)
@@ -610,6 +614,9 @@ func expandTarget(target string) ([]string, error) {
 			if !seen[s] {
 				seen[s] = true
 				out = append(out, s)
+				if len(out) > maxExpandTargetIPs {
+					return nil, fmt.Errorf("目标展开超过 %d 个 IP，请拆分网段或缩小范围", maxExpandTargetIPs)
+				}
 			}
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -322,10 +323,29 @@ func headerBytes(resp *http.Response) []byte {
 	return []byte(b.String())
 }
 
+// validateGitRepo 校验 git 仓库地址：必须为受信任主机的 https 地址（无 userinfo）。
+// 拒绝 ext::/file:///git:// 等可触发命令执行的传输协议。
+func validateGitRepo(repo string) error {
+	u, err := url.Parse(repo)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+		return fmt.Errorf("仓库地址必须为 https:// 且不含凭据: %q", repo)
+	}
+	switch strings.ToLower(u.Hostname()) {
+	case "github.com", "gitee.com", "gitlab.com":
+		return nil
+	}
+	return fmt.Errorf("仓库地址主机不受信任: %s", u.Hostname())
+}
+
 // DownloadNucleiTemplates 从官方仓库下载（git clone）nuclei 模板库到 destDir。
+// repo 来自配置（前端可改），强制校验为受信任主机的 https 地址，
+// 防 git 的 ext::/file:// 等传输协议执行任意命令（CWE-78 配置驱动 RCE）。
 func DownloadNucleiTemplates(destDir, repo string) error {
 	if repo == "" {
 		repo = DefaultConfig().Nuclei.TemplatesRepo
+	}
+	if err := validateGitRepo(repo); err != nil {
+		return err
 	}
 	if _, err := os.Stat(filepath.Join(destDir, ".git")); err == nil {
 		// 已存在，执行 pull 更新。

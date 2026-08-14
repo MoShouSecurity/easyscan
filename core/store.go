@@ -149,6 +149,16 @@ CREATE TABLE IF NOT EXISTS tasks (
 // Close 关闭数据库。
 func (s *Store) Close() error { return s.db.Close() }
 
+// MarkInterruptedTasks 将上次异常退出（崩溃/强杀）遗留的 running/pending
+// 任务标记为 paused。应用启动时调用：防止任务永久停留 running，
+// 避免关闭确认逻辑永久误判，且任务可通过「恢复」继续。
+func (s *Store) MarkInterruptedTasks() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`UPDATE tasks SET status='paused', message='程序异常退出，任务已暂停' WHERE status IN ('running','pending')`)
+	return err
+}
+
 // ---- 写入（Upsert 语义，重复数据自动忽略/更新） ----
 
 func (s *Store) UpsertDomain(d Domain) error {

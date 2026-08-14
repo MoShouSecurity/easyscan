@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -17,6 +18,10 @@ import (
 
 	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
+
+// hexIDRegexp 任务/资产 ID 格式：32 位小写 hex（core.newID 生成）。
+// 用于外部输入 ID 的白名单校验（防路径穿越等）。
+var hexIDRegexp = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 // App 是暴露给前端的后端桥接层，封装核心引擎的启动、任务提交与资产查询。
 type App struct {
@@ -62,6 +67,10 @@ func (a *App) startup(ctx context.Context) {
 		return
 	}
 	a.store = store
+	// 上次异常退出遗留的任务标记为 paused（可恢复），防永久 running。
+	if err := store.MarkInterruptedTasks(); err != nil {
+		println("mark interrupted tasks:", err.Error())
+	}
 	a.sched = core.NewScheduler(store, a.config.ToOptions(), 2)
 	a.sched.Start(2)
 }
@@ -260,8 +269,7 @@ func (a *App) ResumeTask(id string) error {
 	if err := a.store.UpdateTask(t); err != nil {
 		return err
 	}
-	a.sched.Resume(t)
-	return nil
+	return a.sched.Resume(t)
 }
 
 // ---- 资产全局查询 ----
@@ -422,12 +430,42 @@ func openFile(path string) error {
 // ---- 截图 ----
 
 // GetScreenshot 读取截图文件并返回 base64（供前端 data URL 展示）。
+// 仅允许读取截图目录（configDir/screenshots）子树内的文件，防任意本地文件读取。
 func (a *App) GetScreenshot(path string) (string, error) {
+	shotDir := filepath.Join(a.configDir, "screenshots")
+	if !pathWithin(shotDir, path) {
+		return "", fmt.Errorf("非法的截图路径")
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
 	return base64.StdEncoding.EncodeToString(data), nil
+}
+
+// pathWithin 校验 path 位于 dir 子树内（EvalSymlinks 防符号链接逃逸）。
+func pathWithin(dir, path string) bool {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return false
+	}
+	resolvedDir, err := filepath.EvalSymlinks(absDir)
+	if err != nil {
+		resolvedDir = absDir // 目录不存在时退回绝对路径比较
+	}
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	resolvedPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		resolvedPath = absPath
+	}
+	rel, err := filepath.Rel(resolvedDir, resolvedPath)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
 }
 
 // ---- 导出 ----
@@ -437,6 +475,15 @@ func (a *App) ExportTask(taskID string) (string, error) {
 	if a.store == nil {
 		return "", fmt.Errorf("存储未初始化")
 	}
+	// taskID 必须为 32 位 hex（服务端生成的合法 ID），且任务必须存在，
+	// 防路径穿越（taskID 直接拼入文件名）与任意内容导出。
+	if !hexIDRegexp.MatchString(taskID) {
+		return "", fmt.Errorf("非法的任务 ID")
+	}
+	if _, err := a.store.GetTask(taskID); err != nil {
+		return "", fmt.Errorf("任务不存在: %w", err)
+	}
+
 	subs, _ := a.store.ListSubdomainsByTask(taskID, 0)
 	ports, _ := a.store.ListPortsByTask(taskID, 0)
 	sites, _ := a.store.ListSitesByTask(taskID, 0)
@@ -447,16 +494,16 @@ func (a *App) ExportTask(taskID string) (string, error) {
 	w := csv.NewWriter(&buf)
 	_ = w.Write([]string{"类型", "值1", "值2", "值3"})
 	for _, s := range subs {
-		_ = w.Write([]string{"子域名", s.Subdomain, s.IP, s.Source})
+		_ = w.Write([]string{"子域名", csvSafe(s.Subdomain), csvSafe(s.IP), s.Source})
 	}
 	for _, p := range ports {
-		_ = w.Write([]string{"端口", p.IP, fmt.Sprintf("%d", p.Port), p.Service})
+		_ = w.Write([]string{"端口", p.IP, fmt.Sprintf("%d", p.Port), csvSafe(p.Service)})
 	}
 	for _, s := range sites {
-		_ = w.Write([]string{"站点", s.URL, s.Title, s.Fingerprint})
+		_ = w.Write([]string{"站点", csvSafe(s.URL), csvSafe(s.Title), csvSafe(s.Fingerprint)})
 	}
 	for _, l := range leaks {
-		_ = w.Write([]string{"敏感信息", l.URL, l.Type, l.Path})
+		_ = w.Write([]string{"敏感信息", csvSafe(l.URL), csvSafe(l.Type), csvSafe(l.Path)})
 	}
 	w.Flush()
 
@@ -467,4 +514,18 @@ func (a *App) ExportTask(taskID string) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// csvSafe 防 CSV 公式注入（CWE-1236）：来自被扫描站点的不可信内容
+// 以 = + - @ 或制表符/回车开头时，Excel/WPS 会将其解释为公式。
+// 前置单引号使其成为纯文本。
+func csvSafe(v string) string {
+	if v == "" {
+		return v
+	}
+	switch v[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + v
+	}
+	return v
 }

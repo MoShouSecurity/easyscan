@@ -13,13 +13,13 @@ import (
 
 func main() {
 	var (
-		target   = flag.String("target", "", "目标域名或 IP/网段，如 example.com 或 1.2.3.0/24")
-		typ      = flag.String("type", "domain", "任务类型: domain / ip")
-		ports    = flag.String("ports", "top100", "端口模式: test / top100 / top1000 / all")
-		db       = flag.String("db", "easyscan.db", "SQLite 数据库路径")
+		target  = flag.String("target", "", "目标域名或 IP/网段，如 example.com 或 1.2.3.0/24")
+		typ     = flag.String("type", "domain", "任务类型: domain / ip")
+		ports   = flag.String("ports", "top100", "端口模式: test / top100 / top1000 / all")
+		db      = flag.String("db", "easyscan.db", "SQLite 数据库路径")
 		noBrute = flag.Bool("no-brute", false, "关闭子域名字典爆破")
 		noShot  = flag.Bool("no-shot", false, "关闭站点截图")
-		shotDir  = flag.String("shot-dir", "screenshots", "截图保存目录")
+		shotDir = flag.String("shot-dir", "screenshots", "截图保存目录")
 	)
 	flag.Parse()
 

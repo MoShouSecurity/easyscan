@@ -10,8 +10,10 @@ import (
 
 // ScanOptions 描述一次侦察任务的策略参数。
 type ScanOptions struct {
-	// PortMode 端口扫描模式：test / top100 / top1000 / all。
+	// PortMode 端口扫描模式：test / top100 / top1000 / all / custom。
 	PortMode string `json:"port_mode"`
+	// PortSpec 自定义端口规范（范围语法，如 1-1000,8080），仅 PortMode=custom 时生效。
+	PortSpec string `json:"port_spec"`
 	// NoPing 目标禁 ping 时勾选，跳过存活确认直接用 nmap -Pn 扫描所有 IP。
 	NoPing bool `json:"no_ping"`
 	// SubdomainBrute 是否开启子域名字典爆破（ksubdomain 无状态爆破）。
@@ -45,13 +47,13 @@ type ScanOptions struct {
 // DefaultScanOptions 返回默认任务策略。
 func DefaultScanOptions() ScanOptions {
 	return ScanOptions{
-		PortMode:         "top100",
-		SubdomainBrute:   true,
-		Nuclei:           false,
-		FileLeak:         false,
-		Screenshot:       true,
-		Concurrency:      100,
-		Timeout:          5 * time.Second,
+		PortMode:       "top100",
+		SubdomainBrute: true,
+		Nuclei:         false,
+		FileLeak:       false,
+		Screenshot:     true,
+		Concurrency:    100,
+		Timeout:        5 * time.Second,
 	}
 }
 
@@ -71,8 +73,9 @@ type ScanConfig struct {
 	Concurrency     int    `yaml:"concurrency" json:"concurrency"`
 	TimeoutSec      int    `yaml:"timeout_sec" json:"timeout_sec"`
 	DefaultPortMode string `yaml:"default_port_mode" json:"default_port_mode"`
-	NmapPath        string `yaml:"nmap_path" json:"nmap_path"`     // nmap 路径，空则自动探测
-	MasscanPath     string `yaml:"masscan_path" json:"masscan_path"` // masscan 路径，空则自动探测
+	DefaultPortSpec string `yaml:"default_port_spec" json:"default_port_spec"` // 默认自定义端口，仅模式为 custom 时生效
+	NmapPath        string `yaml:"nmap_path" json:"nmap_path"`                 // nmap 路径，空则自动探测
+	MasscanPath     string `yaml:"masscan_path" json:"masscan_path"`           // masscan 路径，空则自动探测
 }
 
 // FileLeakConfig 文件泄漏检测配置。
@@ -157,6 +160,7 @@ func (c Config) ToOptions() ScanOptions {
 	if c.Scan.DefaultPortMode != "" {
 		opts.PortMode = c.Scan.DefaultPortMode
 	}
+	opts.PortSpec = c.Scan.DefaultPortSpec
 	opts.LeakDictPath = c.FileLeak.DictPath
 	opts.NucleiTemplatesDir = c.Nuclei.TemplatesDir
 	opts.ProviderConfigPath = c.Subfinder.ProviderConfig

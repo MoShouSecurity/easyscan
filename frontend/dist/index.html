@@ -117,7 +117,11 @@
     <textarea id="mTarget" rows="3" placeholder="example.com&#10;1.2.3.0/24" oninput="updateTypeHint()" style="resize:vertical"></textarea>
     <div id="typeHint" style="font-size:11px;color:var(--accent);margin-top:4px;display:none"></div>
     <label>端口模式</label>
-    <select id="mPort"><option value="test">测试（6端口）</option><option value="top100">Top 100</option><option value="top1000" selected>Top 1000</option><option value="all">全部端口</option></select>
+    <select id="mPort" onchange="togglePortSpec()"><option value="test">测试（6端口）</option><option value="top100">Top 100</option><option value="top1000" selected>Top 1000</option><option value="all">全部端口</option><option value="custom">自定义端口</option></select>
+    <div id="mPortSpecWrap" style="display:none">
+      <label>自定义端口（范围语法，如 1-1000,8080,9000-9100）</label>
+      <input type="text" id="mPortSpec" placeholder="如 1-1000,8080,9000-9100" />
+    </div>
     <div class="opts">
       <div class="check"><input type="checkbox" id="mBrute" checked /><span>子域名爆破</span></div>
       <div class="check"><input type="checkbox" id="mNoPing" /><span>目标禁 ping（跳过存活确认）</span></div>
@@ -157,7 +161,11 @@
     </div>
     <div class="row">
       <div><label>默认端口模式</label>
-        <select id="cfgPortMode"><option value="test">测试（6端口）</option><option value="top100">Top 100</option><option value="top1000">Top 1000</option><option value="all">全部端口</option></select>
+        <select id="cfgPortMode" onchange="toggleCfgPortSpec()"><option value="test">测试（6端口）</option><option value="top100">Top 100</option><option value="top1000">Top 1000</option><option value="all">全部端口</option><option value="custom">自定义端口</option></select>
+        <div id="cfgPortSpecWrap" style="display:none;margin-top:6px">
+          <label>默认自定义端口</label>
+          <input type="text" id="cfgPortSpec" placeholder="如 1-1000,8080" style="width:100%" />
+        </div>
       </div>
       <div><label>Chrome 路径</label>
         <div style="display:flex;gap:6px">
@@ -418,6 +426,12 @@ function updateTypeHint() {
 }
 function openAddTask() { document.getElementById('modal').classList.add('show'); }
 function closeAddTask() { document.getElementById('modal').classList.remove('show'); }
+function togglePortSpec() {
+  document.getElementById('mPortSpecWrap').style.display = document.getElementById('mPort').value === 'custom' ? '' : 'none';
+}
+function toggleCfgPortSpec() {
+  document.getElementById('cfgPortSpecWrap').style.display = document.getElementById('cfgPortMode').value === 'custom' ? '' : 'none';
+}
 async function submitTask() {
   const targets = splitTargets(document.getElementById('mTarget').value);
   if (!targets.length) { toast('请输入目标', true); return; }
@@ -426,8 +440,12 @@ async function submitTask() {
   try {
     const domains = targets.filter(t => !isIPTarget(t));
     const ips = targets.filter(t => isIPTarget(t));
+    const portMode = document.getElementById('mPort').value;
+    const portSpec = document.getElementById('mPortSpec').value.trim();
+    if (portMode === 'custom' && !portSpec) { toast('请填写自定义端口（如 1-1000,8080）', true); return; }
     const base = {
-      port_mode: document.getElementById('mPort').value,
+      port_mode: portMode,
+      port_spec: portSpec,
       brute: document.getElementById('mBrute').checked,
       no_ping: document.getElementById('mNoPing').checked,
       nuclei: document.getElementById('mNuclei').checked,
@@ -465,6 +483,8 @@ async function openConfig() {
     document.getElementById('cfgConcurrency').value = (cfg.scan && cfg.scan.concurrency) || 100;
     document.getElementById('cfgTimeout').value = (cfg.scan && cfg.scan.timeout_sec) || 5;
     document.getElementById('cfgPortMode').value = (cfg.scan && cfg.scan.default_port_mode) || 'top1000';
+    document.getElementById('cfgPortSpec').value = (cfg.scan && cfg.scan.default_port_spec) || '';
+    toggleCfgPortSpec();
     document.getElementById('cfgChrome').value = (cfg.screenshot && cfg.screenshot.chrome_path) || '';
     document.getElementById('cfgNmap').value = (cfg.scan && cfg.scan.nmap_path) || '';
     document.getElementById('cfgMasscan').value = (cfg.scan && cfg.scan.masscan_path) || '';
@@ -485,6 +505,7 @@ async function saveConfig() {
   cfg.scan.concurrency = parseInt(document.getElementById('cfgConcurrency').value) || 100;
   cfg.scan.timeout_sec = parseInt(document.getElementById('cfgTimeout').value) || 5;
   cfg.scan.default_port_mode = document.getElementById('cfgPortMode').value;
+  cfg.scan.default_port_spec = document.getElementById('cfgPortSpec').value.trim();
   cfg.scan.nmap_path = document.getElementById('cfgNmap').value.trim();
   cfg.scan.masscan_path = document.getElementById('cfgMasscan').value.trim();
   cfg.screenshot = cfg.screenshot || {}; cfg.screenshot.chrome_path = document.getElementById('cfgChrome').value.trim();

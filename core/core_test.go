@@ -72,15 +72,44 @@ func TestOpenStoreAndRoundtrip(t *testing.T) {
 
 func TestPortList(t *testing.T) {
 	cases := map[string]int{
-		"test":    5,
+		"test":    6,
 		"top100":  100,
 		"top1000": 996,
 		"all":     65535,
 	}
 	for mode, want := range cases {
-		got := portList(mode)
+		got := portList(mode, "")
 		if len(got) != want {
 			t.Errorf("portList(%s) = %d ports; want %d", mode, len(got), want)
+		}
+	}
+	// 自定义端口：去重 + 排序。
+	got := portList("custom", "9000-9002,80,1-3,80")
+	if len(got) != 7 {
+		t.Fatalf("portList(custom) = %d ports; want 7", len(got))
+	}
+	if got[0] != 1 || got[6] != 9002 {
+		t.Fatalf("portList(custom) 内容/排序错误: %v", got)
+	}
+	// 自定义端口非法规范返回 nil。
+	if got := portList("custom", "abc"); got != nil {
+		t.Fatalf("portList(custom, invalid) = %v; want nil", got)
+	}
+}
+
+func TestParsePortSpec(t *testing.T) {
+	// 合法：范围 + 单端口 + 多分隔符。
+	ports, err := ParsePortSpec("1-3, 8080;9000-9001")
+	if err != nil {
+		t.Fatalf("ParsePortSpec: %v", err)
+	}
+	if len(ports) != 6 || ports[0] != 1 || ports[3] != 8080 || ports[5] != 9001 {
+		t.Fatalf("ParsePortSpec = %v; want [1 2 3 8080 9000 9001]", ports)
+	}
+	// 非法输入。
+	for _, bad := range []string{"", "abc", "1-", "-1", "0", "70000", "10-5", "-"} {
+		if _, err := ParsePortSpec(bad); err == nil {
+			t.Errorf("ParsePortSpec(%q) 应报错", bad)
 		}
 	}
 }

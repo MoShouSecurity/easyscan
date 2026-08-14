@@ -7,6 +7,8 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -26,12 +28,40 @@ func NewNmapScanner(binary string) *NmapScanner {
 // Available 返回 nmap 是否可用。
 func (n *NmapScanner) Available() bool { return n.binary != "" }
 
-// findNmap 查找 nmap 二进制。
+// findNmap 查找 nmap 二进制：先查 PATH，再探测各平台常见安装位置。
+// GUI 应用从 Finder/桌面启动时 PATH 不含 Homebrew 目录，需显式探测（brew 安装场景）。
 func findNmap() string {
 	if p, err := exec.LookPath("nmap"); err == nil {
 		return p
 	}
+	for _, p := range []string{
+		"/opt/homebrew/bin/nmap", // Apple Silicon Homebrew
+		"/usr/local/bin/nmap",    // Intel Homebrew / 系统
+		"/opt/local/bin/nmap",    // MacPorts
+		"/usr/bin/nmap",          // macOS 系统自带
+	} {
+		if fileExists(p) {
+			return p
+		}
+	}
+	if runtime.GOOS == "windows" {
+		for _, p := range []string{
+			`C:\Program Files (x86)\Nmap\nmap.exe`,
+			`C:\Program Files\Nmap\nmap.exe`,
+			filepath.Join(os.Getenv("LOCALAPPDATA"), "Nmap", "nmap.exe"),
+		} {
+			if fileExists(p) {
+				return p
+			}
+		}
+	}
 	return ""
+}
+
+// fileExists 判断路径是否存在且为文件。
+func fileExists(path string) bool {
+	st, err := os.Stat(path)
+	return err == nil && !st.IsDir()
 }
 
 // DetectNmapPath 探测 nmap 可执行文件路径。
@@ -41,10 +71,7 @@ func DetectNmapPath() string {
 
 // DetectMasscanPath 探测 masscan 可执行文件路径。
 func DetectMasscanPath() string {
-	if p, err := exec.LookPath("masscan"); err == nil {
-		return p
-	}
-	return ""
+	return findMasscan()
 }
 
 // maxNmapArgTargets 直接作为命令行参数传给 nmap 的最大目标数。
@@ -52,9 +79,9 @@ func DetectMasscanPath() string {
 // 留足余量取 1024；超出则改用 -iL 临时文件传入。
 const maxNmapArgTargets = 1024
 
-// nmapTargetArgs 生成 nmap 的目标参数。目标较少时直接传参；
+// targetListArgs 生成 nmap/masscan 的目标参数。目标较少时直接传参；
 // 目标较多时写入临时文件并用 -iL 传入，返回的 cleanup 负责删除临时文件。
-func nmapTargetArgs(targets []string) (args []string, cleanup func(), err error) {
+func targetListArgs(targets []string) (args []string, cleanup func(), err error) {
 	if len(targets) <= maxNmapArgTargets {
 		return targets, func() {}, nil
 	}
@@ -75,8 +102,8 @@ func nmapTargetArgs(targets []string) (args []string, cleanup func(), err error)
 	return []string{"-iL", f.Name()}, cleanup, nil
 }
 
-// nmapPortArgs 根据端口模式生成 nmap 的端口参数。
-func nmapPortArgs(mode string) []string {
+// nmapPortArgs 根据端口模式生成 nmap 的端口参数。custom 模式透传用户端口规范（范围语法）。
+func nmapPortArgs(mode, spec string) []string {
 	switch mode {
 	case "top100":
 		return []string{"--top-ports", "100"}
@@ -84,25 +111,26 @@ func nmapPortArgs(mode string) []string {
 		return []string{"--top-ports", "1000"}
 	case "all":
 		return []string{"-p", "1-65535"}
+	case "custom":
+		return []string{"-p", spec}
 	default: // test
-		return []string{"-p", "22,80,8080,3389,445"}
+		return []string{"-p", "22,80,443,3389,445,8080"}
 	}
 }
 
-// PingSweep 用 nmap -sn 做主机存活探测，返回存活 IP 列表。
-// -sn 会综合 ICMP echo + TCP SYN(80/443) + ARP 探测，即使禁 ping 也能发现存活主机。
-// 探测失败或未发现存活主机时返回空列表，由调用方降级为纯 Go TCP 探测，
-// 避免把网段内不存在的 IP 全部当成存活。
+// PingSweep 用 nmap -sn -PE 做纯 ICMP echo 存活探测，返回存活 IP 列表。
+// -PE 仅发送 ICMP echo request（--disable-arp-ping 禁用局域网 ARP 探测，保证纯 ICMP），
+// 与 masscan -PE 语义一致；探测失败或未发现存活主机时返回空列表，由调用方降级。
 func (n *NmapScanner) PingSweep(ctx context.Context, targets []string) []string {
 	if len(targets) == 0 {
 		return nil
 	}
-	targs, cleanup, err := nmapTargetArgs(targets)
+	targs, cleanup, err := targetListArgs(targets)
 	if err != nil {
 		return nil
 	}
 	defer cleanup()
-	args := append([]string{"-sn", "-T4"}, targs...)
+	args := append([]string{"-sn", "-PE", "--disable-arp-ping", "-T4"}, targs...)
 	out, err := n.run(ctx, args...)
 	if err != nil || len(out) == 0 {
 		return nil
@@ -139,15 +167,16 @@ func parseNmapReportIP(line string) string {
 
 // Scan 对目标执行端口扫描 + 服务/版本识别，返回解析后的主机结果。
 // -Pn 跳过主机发现：前面已单独做过 IP 存活确认，且禁 ping 的主机也能扫到。
-func (n *NmapScanner) Scan(ctx context.Context, targets []string, portMode string) ([]NmapHost, error) {
-	targs, cleanup, err := nmapTargetArgs(targets)
+// portSpec 仅在 custom 模式使用（端口范围语法，如 1-1000,8080）。
+func (n *NmapScanner) Scan(ctx context.Context, targets []string, portMode, portSpec string) ([]NmapHost, error) {
+	targs, cleanup, err := targetListArgs(targets)
 	if err != nil {
 		return nil, err
 	}
 	defer cleanup()
 
 	args := []string{"-sT", "-sV", "-Pn", "--open", "-T4"}
-	args = append(args, nmapPortArgs(portMode)...)
+	args = append(args, nmapPortArgs(portMode, portSpec)...)
 	args = append(args, "-oX", "-")
 	args = append(args, targs...)
 

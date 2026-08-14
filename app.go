@@ -111,7 +111,8 @@ func (a *App) ForceClose() {
 type ScanRequest struct {
 	Target     string `json:"target"`
 	Type       string `json:"type"`      // domain / ip
-	PortMode   string `json:"port_mode"` // test / top100 / top1000 / all
+	PortMode   string `json:"port_mode"` // test / top100 / top1000 / all / custom
+	PortSpec   string `json:"port_spec"` // 自定义端口（范围语法），仅 custom 模式生效
 	Brute      bool   `json:"brute"`
 	NoPing     bool   `json:"no_ping"`
 	Nuclei     bool   `json:"nuclei"`
@@ -127,6 +128,12 @@ func (a *App) StartScan(req ScanRequest) (string, error) {
 	opts := a.config.ToOptions()
 	if req.PortMode != "" {
 		opts.PortMode = req.PortMode
+	}
+	opts.PortSpec = req.PortSpec
+	if opts.PortMode == "custom" {
+		if _, err := core.ParsePortSpec(req.PortSpec); err != nil {
+			return "", fmt.Errorf("自定义端口无效: %w", err)
+		}
 	}
 	opts.SubdomainBrute = req.Brute
 	opts.NoPing = req.NoPing

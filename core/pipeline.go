@@ -239,8 +239,23 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 	if e.opts.NoPing {
 		report("IP存活确认", "目标禁 ping，跳过存活确认直接扫描", base)
 	} else {
-		if nmap.Available() {
-			report("IP存活确认", fmt.Sprintf("nmap ping 探测 %d 个 IP ...", len(ips)), base)
+		// 存活探测降级链：masscan 纯 ICMP → nmap 纯 ICMP（-sn -PE）→ 纯 Go TCP。
+		// masscan/nmap 探测失败（无二进制 / 无权限 / 驱动缺失）或未发现存活时继续降级，
+		// 避免把网段内不存在的 IP 全部当成存活；同时保证探测方式缺失不影响任务。
+		if m := NewMasscanScanner(e.opts.MasscanPath); m.Available() {
+			report("IP存活确认", fmt.Sprintf("masscan ICMP 探测 %d 个 IP ...", len(ips)), base)
+			hit, err := m.PingScan(ctx, nmapT)
+			if err != nil {
+				report("IP存活确认", "masscan 探测失败，降级 nmap: "+err.Error(), base)
+			} else if len(hit) > 0 {
+				alive, discovered = hit, true
+				report("IP存活确认", fmt.Sprintf("masscan 确认 %d/%d 个 IP 存活", len(hit), len(ips)), base+span/10)
+			} else {
+				report("IP存活确认", "masscan 未发现存活主机，降级 nmap", base)
+			}
+		}
+		if !discovered && nmap.Available() {
+			report("IP存活确认", fmt.Sprintf("nmap ICMP 探测 %d 个 IP ...", len(ips)), base)
 			hit := nmap.PingSweep(ctx, nmapT)
 			report("IP存活确认", fmt.Sprintf("nmap 确认 %d/%d 个 IP 存活", len(hit), len(ips)), base+span/10)
 			if len(hit) > 0 {
@@ -288,7 +303,7 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 	// 2. nmap 端口扫描 + 服务/版本识别。
 	if nmap.Available() {
 		report("端口扫描", fmt.Sprintf("nmap 服务识别 %d 个存活 IP (模式: %s) ...", len(alive), e.opts.PortMode), base+span/10)
-		hosts, err := nmap.Scan(ctx, alive, e.opts.PortMode)
+		hosts, err := nmap.Scan(ctx, alive, e.opts.PortMode, e.opts.PortSpec)
 		if err == nil {
 			for _, h := range hosts {
 				if len(h.Ports) > 0 {
@@ -330,7 +345,7 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 	}
 
 	// 3. 纯 Go fallback。
-	ports := portList(e.opts.PortMode)
+	ports := portList(e.opts.PortMode, e.opts.PortSpec)
 	for i, ip := range alive {
 		hostname := ""
 		if ipHosts != nil {

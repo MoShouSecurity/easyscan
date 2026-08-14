@@ -6,12 +6,12 @@ import (
 	"testing"
 )
 
-// TestNmapTargetArgsSmall 少量目标直接作为命令行参数传递。
-func TestNmapTargetArgsSmall(t *testing.T) {
+// TestTargetListArgsSmall 少量目标直接作为命令行参数传递。
+func TestTargetListArgsSmall(t *testing.T) {
 	targets := []string{"127.0.0.1", "10.10.0.5"}
-	args, cleanup, err := nmapTargetArgs(targets)
+	args, cleanup, err := targetListArgs(targets)
 	if err != nil {
-		t.Fatalf("nmapTargetArgs: %v", err)
+		t.Fatalf("targetListArgs: %v", err)
 	}
 	defer cleanup()
 	if len(args) != 2 || args[0] != "127.0.0.1" || args[1] != "10.10.0.5" {
@@ -19,15 +19,15 @@ func TestNmapTargetArgsSmall(t *testing.T) {
 	}
 }
 
-// TestNmapTargetArgsLarge 大量目标（如 /16 网段）改用 -iL 临时文件，避免超出 Windows 命令行长度限制。
-func TestNmapTargetArgsLarge(t *testing.T) {
+// TestTargetListArgsLarge 大量目标（如 /16 网段）改用 -iL 临时文件，避免超出 Windows 命令行长度限制。
+func TestTargetListArgsLarge(t *testing.T) {
 	targets := make([]string, 5000)
 	for i := range targets {
 		targets[i] = "10.10.0.1" // 内容不重要，仅验证数量
 	}
-	args, cleanup, err := nmapTargetArgs(targets)
+	args, cleanup, err := targetListArgs(targets)
 	if err != nil {
-		t.Fatalf("nmapTargetArgs: %v", err)
+		t.Fatalf("targetListArgs: %v", err)
 	}
 	if len(args) != 2 || args[0] != "-iL" || args[1] == "" {
 		t.Fatalf("args = %v; want [-iL <临时文件>]", args)

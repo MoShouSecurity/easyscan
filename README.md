@@ -16,8 +16,8 @@ Easy Scan 是一款**跨平台桌面资产侦察工具**——单二进制 + SQL
   - `ksubdomain` 无状态主动爆破（10 万字典，最高 160 万包/秒）
   - 纯 Go 字典爆破（无权限 / Windows 时的兜底）
 - **DNS 解析**：并发解析 A 记录，IPv4 / IPv6
-- **端口扫描**：纯 Go TCP 扫描（goroutine 池），`test / top100 / top1000 / all` 四档
-- **服务识别**：banner 抓取 + 常见服务指纹
+- **端口扫描**：存活探测三级降级（masscan 纯 ICMP → nmap 纯 ICMP → 纯 Go TCP）+ nmap 服务/版本识别，端口模式 `test / top100 / top1000 / all / custom` 五档（custom 支持范围语法，如 `1-1000,8080`）
+- **服务识别**：nmap -sV 产品/版本（降级为 banner 抓取 + 常见服务指纹）
 
 ### 资产识别
 - **Web 指纹**：标题 / Server 头 / X-Powered-By / 20+ CMS 与中间件特征（WordPress、ThinkPHP、Tomcat、Shiro、Swagger、宝塔、若依 等），正确处理虚拟主机（Host 头 + SNI）
@@ -65,6 +65,7 @@ core/              纯 Go 引擎（GUI 无关，可独立运行 + 单测）
   ksubdomain.go    ksubdomain 无状态爆破（macOS/Linux）
   privilege.go     提权机制（sudo 缓存 / osascript / pkexec）
   dns.go           并发 DNS 解析
+  masscan.go       masscan 纯 ICMP 存活探测（首选，降级 nmap / 纯 Go TCP）
   portscan.go      纯 Go TCP 扫描 + banner 服务识别
   fingerprint.go   Web 指纹（Host/SNI + 标题 + CMS 规则）
   screenshot.go    chromedp 截图 + macOS 屏幕权限检查
@@ -124,6 +125,9 @@ scan:
   concurrency: 100          # 扫描并发度
   timeout_sec: 5            # 单次探测超时（秒）
   default_port_mode: top1000
+  default_port_spec: ""     # 默认自定义端口（仅 default_port_mode 为 custom 时生效）
+  nmap_path: ""             # nmap 路径，空则自动探测（含 Homebrew 常见目录）
+  masscan_path: ""          # masscan 路径，空则自动探测（含 Homebrew 常见目录）
 
 file_leak:
   dict_path: ""             # 文件泄漏自定义字典，空则用内置 30+ 路径
@@ -160,7 +164,7 @@ api_keys: {}                # 第三方数据源 Token
 | 模块 | 说明 |
 |------|------|
 | 子域名 | subfinder 被动 + ksubdomain 主动（需提权）+ 纯 Go 兜底 |
-| 端口 | `test`（6）/ `top100` / `top1000` / `all`（1-65535） |
+| 端口 | `test`（6）/ `top100` / `top1000` / `all`（1-65535）/ `custom`（范围语法，如 `1-1000,8080`） |
 | 指纹 | 标题 / Server / 20+ CMS 与中间件特征 |
 | 截图 | chromedp 无头浏览器（默认开启） |
 | 泄漏 | 30+ 敏感路径 + 自定义字典 |

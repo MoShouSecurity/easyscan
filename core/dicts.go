@@ -1,9 +1,14 @@
 package core
 
-import "strings"
+import (
+	"fmt"
+	"sort"
+	"strconv"
+	"strings"
+)
 
-// portList 返回给定模式对应的端口列表。
-func portList(mode string) []int {
+// portList 返回给定模式对应的端口列表。custom 模式使用 spec 指定的端口（范围语法）。
+func portList(mode, spec string) []int {
 	switch mode {
 	case "all":
 		ports := make([]int, 0, 65535)
@@ -14,10 +19,63 @@ func portList(mode string) []int {
 	case "top1000":
 		return parseInts(top1000Ports)
 	case "test":
-		return []int{22, 80, 8080, 3389, 445}
+		return []int{22, 80, 443, 3389, 445, 8080}
+	case "custom":
+		ports, err := ParsePortSpec(spec)
+		if err != nil {
+			return nil
+		}
+		return ports
 	default: // top100
 		return parseInts(top100Ports)
 	}
+}
+
+// ParsePortSpec 解析自定义端口规范，支持范围语法：
+// 逗号/空格/分号分隔，单端口或 a-b 范围，如 "1-1000,8080,9000-9100"。
+// 返回去重排序后的端口列表；空串或非法输入返回错误。
+func ParsePortSpec(spec string) ([]int, error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return nil, fmt.Errorf("自定义端口不能为空")
+	}
+	seen := map[int]bool{}
+	var out []int
+	for _, part := range strings.FieldsFunc(spec, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == ';'
+	}) {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if i := strings.Index(part, "-"); i > 0 {
+			a, err1 := strconv.Atoi(part[:i])
+			b, err2 := strconv.Atoi(part[i+1:])
+			if err1 != nil || err2 != nil || a < 1 || b > 65535 || a > b {
+				return nil, fmt.Errorf("无效的端口范围: %s", part)
+			}
+			for p := a; p <= b; p++ {
+				if !seen[p] {
+					seen[p] = true
+					out = append(out, p)
+				}
+			}
+		} else {
+			p, err := strconv.Atoi(part)
+			if err != nil || p < 1 || p > 65535 {
+				return nil, fmt.Errorf("无效的端口: %s", part)
+			}
+			if !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("自定义端口不能为空: %s", spec)
+	}
+	sort.Ints(out)
+	return out, nil
 }
 
 func parseInts(s string) []int {

@@ -9,49 +9,104 @@ import (
 	"time"
 )
 
-// enumerateSubdomains 合并被动收集（subfinder）与主动爆破（ksubdomain），
+// persistEnumerated 把枚举到的子域名入库（IP 可为空，DNS 阶段再补）。
+// store 为 nil 时跳过（CLI 场景）；单条失败忽略，不阻断枚举流程。
+func persistEnumerated(store *Store, domain, taskID, source string, hosts []string) {
+	if store == nil {
+		return
+	}
+	for _, host := range hosts {
+		_ = store.UpsertSubdomain(Subdomain{
+			ID:        newID(),
+			Domain:    domain,
+			Subdomain: host,
+			Source:    source,
+			TaskID:    taskID,
+			CreatedAt: nowUnix(),
+		})
+	}
+}
+
+// enumerateSubdomains 合并 FOFA / subfinder 被动收集与 ksubdomain 主动爆破，
 // ksubdomain 不可用（无权限/无网卡/Windows）时降级为纯 Go 字典爆破。
-func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions) []string {
+// 各源结果立即入库（子域名 tab 展示，含未解析出 IP 的记录）。
+// FOFA 独立于爆破开关（被动查库）；subfinder/ksubdomain/纯 Go 跟随 SubdomainBrute。
+func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions, store *Store, taskID string, report ProgressFunc) []string {
 	seen := map[string]bool{}
 
-	// 1. subfinder 被动收集（多公开数据源）。
-	if subs, err := enumerateWithSubfinder(ctx, domain, opts.ProviderConfigPath); err == nil {
-		for _, s := range subs {
-			seen[s] = true
+	// 1. FOFA 被动收集（配置了 API key 才执行），子域名与 IP 直接入库。
+	if opts.FofaKey != "" {
+		results, err := fofaSearch(ctx, domain, opts.FofaKey, opts.ProxyURL, fofaTimeout(opts.Timeout))
+		if err != nil {
+			if report != nil {
+				report("子域名枚举", "FOFA 查询失败，降级继续: "+err.Error(), 5)
+			}
+		} else {
+			fofaHosts := make([]string, 0, len(results))
+			for _, r := range results {
+				seen[r.Host] = true
+				fofaHosts = append(fofaHosts, r.Host)
+				_ = store.UpsertSubdomain(Subdomain{
+					ID:        newID(),
+					Domain:    domain,
+					Subdomain: r.Host,
+					IP:        r.IP,
+					Source:    "fofa",
+					TaskID:    taskID,
+					CreatedAt: nowUnix(),
+				})
+			}
+			if report != nil && len(results) > 0 {
+				report("子域名枚举", fmt.Sprintf("FOFA 收集 %d 个子域名", len(results)), 5)
+			}
 		}
 	}
 
-	// 2. ksubdomain 主动爆破：优先提权执行（弹授权框），失败再子进程隔离执行，最后降级纯 Go。
-	// 库内直调有 SDK Fatalf（os.Exit）闪退风险，父进程内只走子进程隔离版本。
-	enumerated := false
-	if subs, err := enumerateWithKsubdomainPrivileged(domain); err == nil && len(subs) > 0 {
-		for _, s := range subs {
-			seen[s] = true
+	if opts.SubdomainBrute {
+		// 2. subfinder 被动收集（多公开数据源，走代理）。
+		if subs, err := enumerateWithSubfinder(ctx, domain, opts.ProviderConfigPath, opts.ProxyURL); err == nil {
+			persistEnumerated(store, domain, taskID, "subfinder", subs)
+			for _, s := range subs {
+				seen[s] = true
+			}
 		}
-		enumerated = true
-	}
-	if !enumerated {
-		if subs, err := enumerateWithKsubdomainIsolated(ctx, domain); err == nil && len(subs) > 0 {
+
+		// 3. ksubdomain 主动爆破：优先提权执行（弹授权框），失败再子进程隔离执行，最后降级纯 Go。
+		// 库内直调有 SDK Fatalf（os.Exit）闪退风险，父进程内只走子进程隔离版本。
+		enumerated := false
+		if subs, err := enumerateWithKsubdomainPrivileged(domain); err == nil && len(subs) > 0 {
+			persistEnumerated(store, domain, taskID, "ksubdomain", subs)
 			for _, s := range subs {
 				seen[s] = true
 			}
 			enumerated = true
 		}
-	}
-	if !enumerated {
-		// 纯 Go 兜底：优先用 ksubdomain 完整字典的前 10000 词（覆盖更广），
-		// 提高并发、缩短超时以控制在可接受时间内。
-		dict := subdomainDict
-		if full := GetFullSubdomainDict(); len(full) > 0 {
-			const maxDict = 10000
-			if len(full) > maxDict {
-				dict = full[:maxDict]
-			} else {
-				dict = full
+		if !enumerated {
+			if subs, err := enumerateWithKsubdomainIsolated(ctx, domain); err == nil && len(subs) > 0 {
+				persistEnumerated(store, domain, taskID, "ksubdomain", subs)
+				for _, s := range subs {
+					seen[s] = true
+				}
+				enumerated = true
 			}
 		}
-		for _, s := range bruteSubdomains(ctx, domain, dict, 500, 2*time.Second) {
-			seen[s] = true
+		if !enumerated {
+			// 纯 Go 兜底：优先用 ksubdomain 完整字典的前 10000 词（覆盖更广），
+			// 提高并发、缩短超时以控制在可接受时间内。
+			dict := subdomainDict
+			if full := GetFullSubdomainDict(); len(full) > 0 {
+				const maxDict = 10000
+				if len(full) > maxDict {
+					dict = full[:maxDict]
+				} else {
+					dict = full
+				}
+			}
+			brute := bruteSubdomains(ctx, domain, dict, 500, 2*time.Second)
+			persistEnumerated(store, domain, taskID, "brute", brute)
+			for _, s := range brute {
+				seen[s] = true
+			}
 		}
 	}
 

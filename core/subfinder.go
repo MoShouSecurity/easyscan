@@ -31,12 +31,14 @@ func GenerateSubfinderProviderConfig(path string) error {
 
 // enumerateWithSubfinder 用 subfinder 被动收集子域名（多公开数据源）。
 // providerConfig 为 subfinder 的 provider-config.yaml 路径，空则用默认位置。
-func enumerateWithSubfinder(ctx context.Context, domain string, providerConfig string) ([]string, error) {
+// proxyURL 非空时被动收集出站请求走 HTTP 代理（空串=直连）。
+func enumerateWithSubfinder(ctx context.Context, domain string, providerConfig, proxyURL string) ([]string, error) {
 	options := &runner.Options{
 		Silent:         true,
 		Timeout:        30,
 		Threads:        10,
 		ProviderConfig: providerConfig,
+		Proxy:          proxyURL,
 	}
 	r, err := runner.NewRunner(options)
 	if err != nil {

@@ -205,6 +205,9 @@ func (a *App) RescanTask(id string) (string, error) {
 	if t.Params != "" {
 		_ = json.Unmarshal([]byte(t.Params), &opts)
 	}
+	// 旧任务的 params 快照可能不含最新配置，覆盖为当前值（防旧 key 复活/丢失）。
+	opts.FofaKey = a.config.Fofa.APIKey
+	opts.ProxyURL = a.config.Proxy.HTTPURL
 	task, err := a.sched.Submit(t.Target, t.Type, opts)
 	if err != nil {
 		return "", err

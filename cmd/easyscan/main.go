@@ -24,6 +24,8 @@ func main() {
 		shotDir = flag.String("shot-dir", "screenshots", "截图保存目录")
 		bench   = flag.Bool("bench", false, "端口扫描基准对比（nmap vs 纯 Go），不写库")
 		jsonOut = flag.Bool("json", false, "benchmark 输出 JSON（供脚本消费）")
+		fofaKey = flag.String("fofa-key", "", "FOFA API key（子域名收集，留空跳过）")
+		proxy   = flag.String("proxy", "", "HTTP 代理（FOFA/subfinder 出站请求），如 http://127.0.0.1:7890")
 	)
 	flag.Parse()
 
@@ -66,6 +68,8 @@ func main() {
 	opts.SubdomainBrute = !*noBrute
 	opts.Screenshot = !*noShot
 	opts.ScreenshotDir = *shotDir
+	opts.FofaKey = *fofaKey
+	opts.ProxyURL = *proxy
 
 	engine := core.NewEngine(store, opts)
 	ctx := context.Background()

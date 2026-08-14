@@ -97,11 +97,12 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, s
 	subs := map[string]bool{domain: true}
 
 	// 2. 子域名枚举（断点续扫时跳过，从数据库恢复）。
+	// FOFA 独立于爆破开关：关爆破但配置了 FOFA key 时仍执行被动收集。
 	if stageIndex(startStage) <= stageIndex(StageSubdomain) {
 		e.updateStage(taskID, StageSubdomain)
-		if e.opts.SubdomainBrute {
+		if e.opts.SubdomainBrute || e.opts.FofaKey != "" {
 			report("子域名枚举", "无状态爆破 ...", 5)
-			for _, s := range enumerateSubdomains(ctx, domain, e.opts) {
+			for _, s := range enumerateSubdomains(ctx, domain, e.opts, e.store, taskID, report) {
 				subs[s] = true
 			}
 		}

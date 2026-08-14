@@ -38,6 +38,10 @@ type ScanOptions struct {
 	NucleiTemplatesDir string `json:"nuclei_templates_dir"`
 	// ProviderConfigPath subfinder 的 provider-config.yaml 路径（空则用默认位置）。
 	ProviderConfigPath string `json:"provider_config_path"`
+	// FofaKey FOFA API key（空则跳过 FOFA 子域名收集）。
+	FofaKey string `json:"fofa_key"`
+	// ProxyURL 出站 HTTP 代理（FOFA / subfinder 被动收集使用），如 http://127.0.0.1:7890。
+	ProxyURL string `json:"proxy_url"`
 	// Concurrency 并发度（0 表示使用默认值）。
 	Concurrency int `json:"concurrency"`
 	// Timeout 单次网络探测超时（0 表示默认值），序列化为纳秒以便任务参数往返。
@@ -63,6 +67,7 @@ type Config struct {
 	FileLeak   FileLeakConfig    `yaml:"file_leak" json:"file_leak"`
 	Nuclei     NucleiConfig      `yaml:"nuclei" json:"nuclei"`
 	Subfinder  SubfinderConfig   `yaml:"subfinder" json:"subfinder"`
+	Fofa       FofaConfig        `yaml:"fofa" json:"fofa"`
 	Screenshot ScreenshotConfig  `yaml:"screenshot" json:"screenshot"`
 	Proxy      ProxyConfig       `yaml:"proxy" json:"proxy"`
 	APIKeys    map[string]string `yaml:"api_keys" json:"api_keys"`
@@ -93,6 +98,11 @@ type NucleiConfig struct {
 // SubfinderConfig subfinder 被动子域名收集配置。
 type SubfinderConfig struct {
 	ProviderConfig string `yaml:"provider_config" json:"provider_config"` // provider-config.yaml 路径，空则用默认
+}
+
+// FofaConfig FOFA 资产搜索引擎配置（https://fofa.info/api）。
+type FofaConfig struct {
+	APIKey string `yaml:"api_key" json:"api_key"` // FOFA API key，空则不启用 FOFA 收集
 }
 
 // ScreenshotConfig 截图配置。
@@ -164,6 +174,8 @@ func (c Config) ToOptions() ScanOptions {
 	opts.LeakDictPath = c.FileLeak.DictPath
 	opts.NucleiTemplatesDir = c.Nuclei.TemplatesDir
 	opts.ProviderConfigPath = c.Subfinder.ProviderConfig
+	opts.FofaKey = c.Fofa.APIKey
+	opts.ProxyURL = c.Proxy.HTTPURL
 	opts.ChromePath = c.Screenshot.ChromePath
 	opts.NmapPath = c.Scan.NmapPath
 	opts.MasscanPath = c.Scan.MasscanPath

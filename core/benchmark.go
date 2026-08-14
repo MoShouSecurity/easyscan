@@ -23,18 +23,18 @@ type PortBenchResult struct {
 
 // BenchmarkReport 一次基准对比的完整报告。
 type BenchmarkReport struct {
-	Target   string        `json:"target"`
-	PortMode string        `json:"port_mode"`
-	Ports    int           `json:"ports_scanned"`
-	NmapOpen int           `json:"nmap_open"`
-	GoOpen   int           `json:"pure_go_open"`
-	Common   int           `json:"common_open"`
-	NmapOnly int           `json:"nmap_only"`    // 纯 Go 漏报数
-	GoOnly   int           `json:"pure_go_only"` // 纯 Go 误报数
-	Recall   float64       `json:"recall"`       // 纯 Go 召回率 = common / nmap_open
-	FalsePos float64       `json:"false_positive_rate"`
-	NmapTime time.Duration `json:"nmap_duration_ns"`
-	GoTime   time.Duration `json:"pure_go_duration_ns"`
+	Target   string            `json:"target"`
+	PortMode string            `json:"port_mode"`
+	Ports    int               `json:"ports_scanned"`
+	NmapOpen int               `json:"nmap_open"`
+	GoOpen   int               `json:"pure_go_open"`
+	Common   int               `json:"common_open"`
+	NmapOnly int               `json:"nmap_only"`    // 纯 Go 漏报数
+	GoOnly   int               `json:"pure_go_only"` // 纯 Go 误报数
+	Recall   float64           `json:"recall"`       // 纯 Go 召回率 = common / nmap_open
+	FalsePos float64           `json:"false_positive_rate"`
+	NmapTime time.Duration     `json:"nmap_duration_ns"`
+	GoTime   time.Duration     `json:"pure_go_duration_ns"`
 	Details  []PortBenchResult `json:"details"`
 }
 

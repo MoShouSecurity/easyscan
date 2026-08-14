@@ -118,9 +118,10 @@ func nmapPortArgs(mode, spec string) []string {
 	}
 }
 
-// PingSweep 用 nmap -sn -PE 做纯 ICMP echo 存活探测，返回存活 IP 列表。
-// -PE 仅发送 ICMP echo request（--disable-arp-ping 禁用局域网 ARP 探测，保证纯 ICMP），
-// 与 masscan -PE 语义一致；探测失败或未发现存活主机时返回空列表，由调用方降级。
+// PingSweep 用 nmap -sn -PE 做 ICMP echo 存活探测，返回存活 IP 列表。
+// -PE 发送 ICMP echo request；局域网目标 nmap 自动用 ARP 解析 MAC（不禁用——
+// 禁用 ARP 会导致局域网 ICMP 探测大量随机漏报，每次扫描结果不稳定）。
+// 探测失败或未发现存活主机时返回空列表，由调用方降级。
 func (n *NmapScanner) PingSweep(ctx context.Context, targets []string) []string {
 	if len(targets) == 0 {
 		return nil
@@ -130,7 +131,7 @@ func (n *NmapScanner) PingSweep(ctx context.Context, targets []string) []string 
 		return nil
 	}
 	defer cleanup()
-	args := append([]string{"-sn", "-PE", "--disable-arp-ping", "-T4"}, targs...)
+	args := append([]string{"-sn", "-PE", "-T4"}, targs...)
 	out, err := n.run(ctx, nil, args...)
 	if err != nil || len(out) == 0 {
 		return nil

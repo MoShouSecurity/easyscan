@@ -59,8 +59,10 @@ func (m *MasscanScanner) PingScan(ctx context.Context, targets []string) ([]stri
 	}
 	defer cleanup()
 
-	// -PE 纯 ICMP echo；--retries 2 减少丢包漏报；--wait 2 缩短收尾等待（默认 10s）。
-	args := []string{"-PE", "--rate", fmt.Sprintf("%d", m.rate), "--retries", "2", "--wait", "2", "-oJ", "-"}
+	// -PE 纯 ICMP echo；--retries 3 减少丢包漏报；
+	// --wait 5 收尾等待：局域网设备（WiFi 节能唤醒/ARP 慢）响应常超 2s，
+	// 等待过短会随机漏报导致每次扫描结果不同（5s 是准确性与耗时的折中）。
+	args := []string{"-PE", "--rate", fmt.Sprintf("%d", m.rate), "--retries", "3", "--wait", "5", "-oJ", "-"}
 	args = append(args, targs...)
 
 	out, err := m.run(ctx, args...)

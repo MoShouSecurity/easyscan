@@ -22,11 +22,12 @@ import (
 //
 // 用户取消 UAC 或提权失败时返回错误，由调用方降级为纯 Go 字典爆破。
 func enumerateWithKsubdomainPrivileged(domain string) ([]string, error) {
-	// 1. 已是管理员则直接库内直调。
+	// 1. 已是管理员则子进程隔离执行（helper 模式，继承管理员权限）。
+	// 不走库内直调：SDK Fatalf（os.Exit）会杀死 GUI 进程，子进程隔离后崩溃只影响 helper。
 	if tok, err := windows.OpenCurrentProcessToken(); err == nil {
 		if tok.IsElevated() {
 			_ = tok.Close()
-			return enumerateWithKsubdomain(context.Background(), domain)
+			return enumerateWithKsubdomainIsolated(context.Background(), domain)
 		}
 		_ = tok.Close()
 	}

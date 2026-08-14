@@ -7,6 +7,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -40,6 +43,36 @@ func (c *subdomainCollector) Close() error { return nil }
 // EnumerateWithKsubdomain 导出 ksubdomain 枚举（供 CLI helper 模式与提权调用）。
 func EnumerateWithKsubdomain(ctx context.Context, domain string) ([]string, error) {
 	return enumerateWithKsubdomain(ctx, domain)
+}
+
+// ksubdomainConfigFile 返回 ksubdomain 网卡配置（ksubdomain.yaml）的稳定路径：
+// 应用配置目录（如 ~/Library/Application Support/EasyScan），与 cwd 无关。
+// GUI 从 Finder 启动时 cwd=/，读不到 cwd 下的配置会走 30 秒网卡自动识别
+// （且识别失败 SDK 直接 Fatalf 杀进程）；配置落盘到稳定路径后二次扫描直接命中。
+func ksubdomainConfigFile() string {
+	dir, err := os.UserConfigDir()
+	if err != nil || dir == "" {
+		return "ksubdomain.yaml"
+	}
+	return filepath.Join(dir, "EasyScan", "ksubdomain.yaml")
+}
+
+// enumerateWithKsubdomainIsolated 以子进程（--ksubdomain-enum helper 模式）执行 ksubdomain 枚举。
+// SDK 内部多处 gologger.Fatalf 会直接 os.Exit(1)（网卡/DNS 识别失败等），
+// 库内直调会杀死 GUI 进程且 recover 无法拦截；子进程隔离后崩溃只影响 helper，
+// 父进程收到非零退出码即可优雅降级为纯 Go 字典爆破。
+func enumerateWithKsubdomainIsolated(ctx context.Context, domain string) ([]string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	cmd := exec.CommandContext(ctx, exe, "--ksubdomain-enum", domain)
+	HideCmdWindow(cmd)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	return parseSubdomainOutput(out), nil
 }
 
 // GetFullSubdomainDict 返回 ksubdomain 内置完整字典（约 10 万词）。
@@ -113,7 +146,15 @@ func testKsubdomainSpeed(ether *device.EtherTable) (int64, error) {
 }
 
 // enumerateWithKsubdomain 用 ksubdomain 无状态爆破枚举子域名。
+// 注意：本函数在 helper 子进程内执行（父进程通过 enumerateWithKsubdomainIsolated /
+// 提权机制调用），SDK 内部 Fatalf（os.Exit）风险被进程隔离。
 func enumerateWithKsubdomain(ctx context.Context, domain string) ([]string, error) {
+	// 固定网卡配置路径（应用配置目录）：GUI 从 Finder 启动时 cwd=/，
+	// 默认在 cwd 找 ksubdomain.yaml 会落空并触发 30 秒网卡自动识别。
+	// 无条件设置：首次识别成功后 saveConfig 会落盘到该路径，二次扫描直接命中。
+	cfgFile := ksubdomainConfigFile()
+	_ = os.MkdirAll(filepath.Dir(cfgFile), 0o755)
+	_ = os.Setenv("ksubdomain-config", cfgFile)
 	resolvers := options.GetResolvers(nil)
 	ether := options.GetDeviceConfig(resolvers)
 

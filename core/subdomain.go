@@ -21,7 +21,8 @@ func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions) [
 		}
 	}
 
-	// 2. ksubdomain 主动爆破：优先提权执行（弹授权框），失败再库内直调，最后降级纯 Go。
+	// 2. ksubdomain 主动爆破：优先提权执行（弹授权框），失败再子进程隔离执行，最后降级纯 Go。
+	// 库内直调有 SDK Fatalf（os.Exit）闪退风险，父进程内只走子进程隔离版本。
 	enumerated := false
 	if subs, err := enumerateWithKsubdomainPrivileged(domain); err == nil && len(subs) > 0 {
 		for _, s := range subs {
@@ -30,7 +31,7 @@ func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions) [
 		enumerated = true
 	}
 	if !enumerated {
-		if subs, err := enumerateWithKsubdomain(ctx, domain); err == nil && len(subs) > 0 {
+		if subs, err := enumerateWithKsubdomainIsolated(ctx, domain); err == nil && len(subs) > 0 {
 			for _, s := range subs {
 				seen[s] = true
 			}

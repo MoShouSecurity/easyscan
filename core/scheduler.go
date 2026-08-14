@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 )
 
@@ -98,6 +99,16 @@ func (s *Scheduler) worker() {
 }
 
 func (s *Scheduler) run(t *Task) {
+	// 引擎内任何 panic（如第三方库）都不应带崩整个 GUI 进程：捕获后把任务标记为失败。
+	defer func() {
+		if r := recover(); r != nil {
+			t.Status = TaskFailed
+			t.FinishedAt = nowUnix()
+			t.Message = fmt.Sprintf("任务异常终止: %v", r)
+			_ = s.store.UpdateTask(t)
+		}
+	}()
+
 	var opts ScanOptions
 	_ = json.Unmarshal([]byte(t.Params), &opts)
 	if opts.Concurrency == 0 {

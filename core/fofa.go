@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -26,6 +27,7 @@ const fofaMinTimeout = 15 * time.Second
 type fofaResult struct {
 	Host string
 	IP   string
+	Port int // FOFA 收录的端口（0 表示无端口线索）
 }
 
 // fofaResponse FOFA API 响应结构（仅取需要的字段）。
@@ -59,7 +61,7 @@ func fofaSearchImpl(ctx context.Context, domain, apiKey, proxyURL string, timeou
 	params := url.Values{
 		"key":     {apiKey},
 		"qbase64": {base64.StdEncoding.EncodeToString([]byte(query))},
-		"fields":  {"host,ip"},
+		"fields":  {"host,ip,port"},
 		"size":    {fmt.Sprintf("%d", fofaAPIPageSize)},
 		"page":    {"1"},
 	}
@@ -110,6 +112,7 @@ func fofaSearchImpl(ctx context.Context, domain, apiKey, proxyURL string, timeou
 //   - host 归一化（去空格/小写/去尾点），丢弃空值、裸 IP 与目标域之外的记录
 //     （domain= 语法会带回 example.com.evil.com 这类前缀绕过结果）
 //   - IP 必须为合法地址（丢弃空值、ip:port 形态）
+//   - port 为 1-65535 时保留（供站点直接探测），否则置 0
 //   - 同一 host 多行时保留第一条有效记录
 func fofaFilterResults(domain string, rows [][]string) []fofaResult {
 	out := make([]fofaResult, 0)
@@ -129,11 +132,17 @@ func fofaFilterResults(domain string, rows [][]string) []fofaResult {
 		if net.ParseIP(ip) == nil {
 			continue // 空或非法 IP（含 ip:port 形态）
 		}
+		port := 0
+		if len(row) >= 3 {
+			if p, err := strconv.Atoi(strings.TrimSpace(row[2])); err == nil && p > 0 && p <= 65535 {
+				port = p
+			}
+		}
 		if seen[host] {
 			continue
 		}
 		seen[host] = true
-		out = append(out, fofaResult{Host: host, IP: ip})
+		out = append(out, fofaResult{Host: host, IP: ip, Port: port})
 	}
 	return out
 }

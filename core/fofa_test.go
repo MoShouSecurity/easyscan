@@ -15,28 +15,32 @@ import (
 // TestFofaFilterResults 过滤逻辑 table-driven 测试。
 func TestFofaFilterResults(t *testing.T) {
 	cases := []struct {
-		name  string
-		rows  [][]string
-		want  int
-		first string // 期望第一条 host（无则为空）
+		name     string
+		rows     [][]string
+		want     int
+		first    string // 期望第一条 host（无则为空）
+		wantPort int    // 期望第一条 port（-1 表示不校验）
 	}{
-		{"正常子域名", [][]string{{"api.example.com", "1.2.3.4"}}, 1, "api.example.com"},
-		{"根域名本身", [][]string{{"example.com", "1.2.3.4"}}, 1, "example.com"},
-		{"大小写加尾点归一化", [][]string{{"Www.Example.COM.", "1.2.3.4"}}, 1, "www.example.com"},
-		{"裸 IP host 丢弃", [][]string{{"1.2.3.4", "5.6.7.8"}}, 0, ""},
-		{"前缀绕过丢弃", [][]string{{"sub.example.com.evil.com", "1.2.3.4"}}, 0, ""},
-		{"无关域名丢弃", [][]string{{"other.com", "1.2.3.4"}}, 0, ""},
-		{"空 host 丢弃", [][]string{{"", "1.2.3.4"}}, 0, ""},
-		{"空 IP 丢弃", [][]string{{"a.example.com", ""}}, 0, ""},
-		{"非法 IP 丢弃", [][]string{{"a.example.com", "not-an-ip"}}, 0, ""},
-		{"带端口 IP 丢弃", [][]string{{"a.example.com", "1.2.3.4:8080"}}, 0, ""},
-		{"重复 host 保留首条", [][]string{{"a.example.com", "1.1.1.1"}, {"a.example.com", "2.2.2.2"}}, 1, "a.example.com"},
-		{"列不足丢弃", [][]string{{"x"}}, 0, ""},
+		{"正常子域名", [][]string{{"api.example.com", "1.2.3.4"}}, 1, "api.example.com", -1},
+		{"根域名本身", [][]string{{"example.com", "1.2.3.4"}}, 1, "example.com", -1},
+		{"大小写加尾点归一化", [][]string{{"Www.Example.COM.", "1.2.3.4"}}, 1, "www.example.com", -1},
+		{"裸 IP host 丢弃", [][]string{{"1.2.3.4", "5.6.7.8"}}, 0, "", -1},
+		{"前缀绕过丢弃", [][]string{{"sub.example.com.evil.com", "1.2.3.4"}}, 0, "", -1},
+		{"无关域名丢弃", [][]string{{"other.com", "1.2.3.4"}}, 0, "", -1},
+		{"空 host 丢弃", [][]string{{"", "1.2.3.4"}}, 0, "", -1},
+		{"空 IP 丢弃", [][]string{{"a.example.com", ""}}, 0, "", -1},
+		{"非法 IP 丢弃", [][]string{{"a.example.com", "not-an-ip"}}, 0, "", -1},
+		{"带端口 IP 丢弃", [][]string{{"a.example.com", "1.2.3.4:8080"}}, 0, "", -1},
+		{"重复 host 保留首条", [][]string{{"a.example.com", "1.1.1.1"}, {"a.example.com", "2.2.2.2"}}, 1, "a.example.com", -1},
+		{"合法端口保留", [][]string{{"a.example.com", "1.1.1.1", "8080"}}, 1, "a.example.com", 8080},
+		{"非法端口置零", [][]string{{"a.example.com", "1.1.1.1", "not-a-port"}}, 1, "a.example.com", 0},
+		{"无端口列", [][]string{{"a.example.com", "1.1.1.1"}}, 1, "a.example.com", 0},
+		{"列不足丢弃", [][]string{{"x"}}, 0, "", -1},
 		{"混合行", [][]string{
 			{"ok.example.com", "1.1.1.1"},
 			{"bad.evil.com", "2.2.2.2"},
 			{"", "3.3.3.3"},
-		}, 1, "ok.example.com"},
+		}, 1, "ok.example.com", -1},
 	}
 	for _, c := range cases {
 		got := fofaFilterResults("example.com", c.rows)
@@ -46,6 +50,9 @@ func TestFofaFilterResults(t *testing.T) {
 		}
 		if c.first != "" && (len(got) == 0 || got[0].Host != c.first) {
 			t.Errorf("%s: 首条 = %+v; want host %s", c.name, got, c.first)
+		}
+		if c.wantPort >= 0 && (len(got) == 0 || got[0].Port != c.wantPort) {
+			t.Errorf("%s: 首条 port = %+v; want %d", c.name, got, c.wantPort)
 		}
 	}
 }
@@ -72,8 +79,8 @@ func TestFofaSearchOK(t *testing.T) {
 		if err != nil || string(decoded) != `domain="example.com"` {
 			t.Errorf("qbase64 解码 = %q err=%v; want domain=\"example.com\"", decoded, err)
 		}
-		if got := r.URL.Query().Get("fields"); got != "host,ip" {
-			t.Errorf("fields = %q; want host,ip", got)
+		if got := r.URL.Query().Get("fields"); got != "host,ip,port" {
+			t.Errorf("fields = %q; want host,ip,port", got)
 		}
 		if got := r.URL.Query().Get("size"); got != "10000" {
 			t.Errorf("size = %q; want 10000", got)
@@ -82,7 +89,7 @@ func TestFofaSearchOK(t *testing.T) {
 			t.Errorf("page = %q; want 1", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"error":false,"size":2,"results":[["a.example.com","1.1.1.1"],["1.2.3.4","5.6.7.8"]]}`))
+		_, _ = w.Write([]byte(`{"error":false,"size":2,"results":[["a.example.com","1.1.1.1","8080"],["1.2.3.4","5.6.7.8","80"]]}`))
 	})
 
 	// 直连 mock（proxyURL 传空）。
@@ -91,8 +98,8 @@ func TestFofaSearchOK(t *testing.T) {
 		t.Fatalf("fofaSearch: %v", err)
 	}
 	_ = hits
-	if len(results) != 1 || results[0].Host != "a.example.com" || results[0].IP != "1.1.1.1" {
-		t.Fatalf("results = %+v; want 仅 a.example.com（裸 IP 行被过滤）", results)
+	if len(results) != 1 || results[0].Host != "a.example.com" || results[0].IP != "1.1.1.1" || results[0].Port != 8080 {
+		t.Fatalf("results = %+v; want 仅 a.example.com（裸 IP 行被过滤，port=8080）", results)
 	}
 }
 

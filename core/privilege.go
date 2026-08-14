@@ -48,11 +48,12 @@ func enumerateWithKsubdomainPrivileged(domain string) ([]string, error) {
 }
 
 // parseSubdomainOutput 解析 helper 模式输出的子域名（一行一个）。
+// 非域名字面量的行（SDK 日志混入 stdout 的 [INFO] 等）直接丢弃。
 func parseSubdomainOutput(out []byte) []string {
 	subs := make([]string, 0)
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		line = strings.TrimSpace(line)
-		if line != "" {
+		if isSubdomainLine(line) {
 			subs = append(subs, line)
 		}
 	}

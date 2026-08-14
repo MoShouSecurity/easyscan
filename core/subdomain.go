@@ -34,7 +34,8 @@ func persistEnumerated(store *Store, domain, taskID, source string, hosts []stri
 func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions, store *Store, taskID string, report ProgressFunc) []string {
 	seen := map[string]bool{}
 
-	// 1. FOFA 被动收集（配置了 API key 才执行），子域名与 IP 直接入库。
+	// 1. FOFA 被动收集（配置了 API key 才执行），子域名与 IP 直接入库；
+	// 带端口线索的记录直接探测站点入库（进入后续指纹/截图流程）。
 	if opts.FofaKey != "" {
 		results, err := fofaSearch(ctx, domain, opts.FofaKey, opts.ProxyURL, fofaTimeout(opts.Timeout))
 		if err != nil {
@@ -42,19 +43,30 @@ func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions, s
 				report("子域名枚举", "FOFA 查询失败，降级继续: "+err.Error(), 5)
 			}
 		} else {
-			fofaHosts := make([]string, 0, len(results))
 			for _, r := range results {
 				seen[r.Host] = true
-				fofaHosts = append(fofaHosts, r.Host)
-				_ = store.UpsertSubdomain(Subdomain{
-					ID:        newID(),
-					Domain:    domain,
-					Subdomain: r.Host,
-					IP:        r.IP,
-					Source:    "fofa",
-					TaskID:    taskID,
-					CreatedAt: nowUnix(),
-				})
+				if store != nil {
+					_ = store.UpsertSubdomain(Subdomain{
+						ID:        newID(),
+						Domain:    domain,
+						Subdomain: r.Host,
+						IP:        r.IP,
+						Source:    "fofa",
+						TaskID:    taskID,
+						CreatedAt: nowUnix(),
+					})
+					// FOFA 收录的端口在端口扫描模式之外也可能开放 Web 服务，
+					// 直接用子域名做 Host 头探测 http/https，命中即入库站点（截图链）。
+					if r.Port > 0 {
+						for _, scheme := range []string{"http", "https"} {
+							if site, ok := probeSite(ctx, r.IP, r.Port, scheme, r.Host, opts.Timeout); ok {
+								site.TaskID = taskID
+								_ = store.UpsertSite(site)
+								break
+							}
+						}
+					}
+				}
 			}
 			if report != nil && len(results) > 0 {
 				report("子域名枚举", fmt.Sprintf("FOFA 收集 %d 个子域名", len(results)), 5)

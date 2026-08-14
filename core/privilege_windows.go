@@ -142,11 +142,12 @@ func shellExecuteRunas(exe, params string) (windows.Handle, error) {
 
 // parseSubdomainOutput 解析 helper 输出的子域名（一行一个）。
 // 与 Unix 端（privilege.go）同名函数按 build tag 分平台，逻辑保持一致。
+// 非域名字面量的行（SDK 日志混入 stdout 的 [INFO] 等）直接丢弃。
 func parseSubdomainOutput(out []byte) []string {
 	subs := make([]string, 0)
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		line = strings.TrimSpace(line)
-		if line != "" {
+		if isSubdomainLine(line) {
 			subs = append(subs, line)
 		}
 	}

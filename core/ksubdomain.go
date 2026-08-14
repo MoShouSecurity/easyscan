@@ -15,6 +15,7 @@ import (
 	"time"
 
 	ksubdomain "github.com/boy-hack/ksubdomain/v2/pkg/core"
+	"github.com/boy-hack/ksubdomain/v2/pkg/core/gologger"
 	"github.com/boy-hack/ksubdomain/v2/pkg/core/options"
 	"github.com/boy-hack/ksubdomain/v2/pkg/device"
 	"github.com/boy-hack/ksubdomain/v2/pkg/runner"
@@ -55,6 +56,26 @@ func ksubdomainConfigFile() string {
 		return "ksubdomain.yaml"
 	}
 	return filepath.Join(dir, "EasyScan", "ksubdomain.yaml")
+}
+
+// isSubdomainLine 判断 helper 输出行是否为合法域名字面量。
+// 防御 SDK/子进程日志混入 stdout：日志行（[INFO] 等）含空格与特殊字符，直接丢弃。
+func isSubdomainLine(line string) bool {
+	if len(line) == 0 || len(line) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(line, ".") {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		for _, c := range label {
+			if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_' {
+				continue
+			}
+			return false
+		}
+	}
+	return strings.Contains(line, ".")
 }
 
 // enumerateWithKsubdomainIsolated 以子进程（--ksubdomain-enum helper 模式）执行 ksubdomain 枚举。
@@ -149,6 +170,10 @@ func testKsubdomainSpeed(ether *device.EtherTable) (int64, error) {
 // 注意：本函数在 helper 子进程内执行（父进程通过 enumerateWithKsubdomainIsolated /
 // 提权机制调用），SDK 内部 Fatalf（os.Exit）风险被进程隔离。
 func enumerateWithKsubdomain(ctx context.Context, domain string) ([]string, error) {
+	// SDK 日志（gologger）默认全部打到 stdout——helper 模式下 stdout 是结果通道，
+	// INFO 日志混入会被父进程误当子域名解析。全局静默（Fatal 级别仍输出并退出）。
+	gologger.MaxLevel = gologger.Silent
+
 	// 固定网卡配置路径（应用配置目录）：GUI 从 Finder 启动时 cwd=/，
 	// 默认在 cwd 找 ksubdomain.yaml 会落空并触发 30 秒网卡自动识别。
 	// 无条件设置：首次识别成功后 saveConfig 会落盘到该路径，二次扫描直接命中。

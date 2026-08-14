@@ -225,6 +225,15 @@ func (e *Engine) ScanIPs(ctx context.Context, target string, taskID string, star
 // 优先用 nmap（-sn 存活确认 + -sV 服务/版本识别），不可用/失败时降级纯 Go 扫描。
 func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTargets []string, ipHosts map[string][]string, taskID string, report ProgressFunc, base int, span int) []Site {
 	siteMap := map[string]Site{}
+	// 合并任务已有站点（如 FOFA 端口线索在枚举阶段直接探测入库的），
+	// 保证它们进入后续泄漏/POC/截图等附加流程。
+	if taskID != "" {
+		if saved, err := e.store.ListSitesByTask(taskID, 0); err == nil {
+			for _, s := range saved {
+				siteMap[s.URL] = s
+			}
+		}
+	}
 	nmap := NewNmapScanner(e.opts.NmapPath)
 	nmapT := nmapTargets
 	if len(nmapT) == 0 {

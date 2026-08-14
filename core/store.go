@@ -260,7 +260,9 @@ func (s *Store) GetTask(id string) (*Task, error) {
 	return &t, nil
 }
 
-// DeleteTask 删除任务及其专属资产（端口/站点/泄漏）；子域名是全局资产，仅解绑 task_id。
+// DeleteTask 删除任务及其全部关联数据：端口/站点/泄漏/存活 IP/子域名
+// （子域名归属最后一个写入的任务，删除该任务即连同其子域名一起删除）。
+// 根域名（domains）在该域名无任何子域名且无其他任务引用时一并清理。
 func (s *Store) DeleteTask(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -271,23 +273,28 @@ func (s *Store) DeleteTask(id string) error {
 	rollback := func() {
 		_ = tx.Rollback()
 	}
-	if _, err := tx.Exec(`DELETE FROM ports WHERE task_id=?`, id); err != nil {
-		rollback()
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM sites WHERE task_id=?`, id); err != nil {
-		rollback()
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM leaks WHERE task_id=?`, id); err != nil {
-		rollback()
-		return err
-	}
-	if _, err := tx.Exec(`UPDATE subdomains SET task_id='' WHERE task_id=?`, id); err != nil {
-		rollback()
-		return err
+	for _, stmt := range []string{
+		`DELETE FROM ports WHERE task_id=?`,
+		`DELETE FROM sites WHERE task_id=?`,
+		`DELETE FROM leaks WHERE task_id=?`,
+		`DELETE FROM ips WHERE task_id=?`,
+		`DELETE FROM subdomains WHERE task_id=?`,
+	} {
+		if _, err := tx.Exec(stmt, id); err != nil {
+			rollback()
+			return err
+		}
 	}
 	if _, err := tx.Exec(`DELETE FROM tasks WHERE id=?`, id); err != nil {
+		rollback()
+		return err
+	}
+	// 清理无引用的根域名（无子域名且无其他任务引用）。
+	if _, err := tx.Exec(`DELETE FROM domains WHERE domain NOT IN (
+		SELECT DISTINCT domain FROM subdomains
+	) AND domain NOT IN (
+		SELECT DISTINCT target FROM tasks WHERE type='domain'
+	)`); err != nil {
 		rollback()
 		return err
 	}

@@ -229,6 +229,12 @@ func TestTaskFilterAndSearch(t *testing.T) {
 	if err := s.UpsertLeak(Leak{ID: newID(), TaskID: taskA, URL: "http://api.example.com/.git/config", Path: "/.git/config", Type: "git", StatusCode: 200, CreatedAt: nowUnix()}); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.UpsertIP(IP{ID: newID(), IP: "10.0.0.1", TaskID: taskA, CreatedAt: nowUnix()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertSubdomain(Subdomain{ID: newID(), Domain: "example.com", Subdomain: "api.example.com", IP: "10.0.0.1", Source: "fofa", TaskID: taskA, CreatedAt: nowUnix()}); err != nil {
+		t.Fatal(err)
+	}
 
 	// 按任务过滤。
 	portsA, _ := s.ListPortsByTask(taskA, 0)
@@ -261,5 +267,14 @@ func TestTaskFilterAndSearch(t *testing.T) {
 	}
 	if leaks, _ := s.ListLeaksByTask(taskA, 0); len(leaks) != 0 {
 		t.Fatalf("删除后泄漏仍存在: %+v", leaks)
+	}
+	if ips, _ := s.ListIPsByTask(taskA, 0); len(ips) != 0 {
+		t.Fatalf("删除后存活 IP 仍存在: %+v", ips)
+	}
+	if subs, _ := s.ListSubdomainsByTask(taskA, 0); len(subs) != 0 {
+		t.Fatalf("删除后子域名仍存在: %+v", subs)
+	}
+	if _, err := s.GetTask(taskA); err == nil {
+		t.Fatal("删除后任务仍存在")
 	}
 }

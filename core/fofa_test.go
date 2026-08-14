@@ -35,6 +35,10 @@ func TestFofaFilterResults(t *testing.T) {
 		{"合法端口保留", [][]string{{"a.example.com", "1.1.1.1", "8080"}}, 1, "a.example.com", 8080},
 		{"非法端口置零", [][]string{{"a.example.com", "1.1.1.1", "not-a-port"}}, 1, "a.example.com", 0},
 		{"无端口列", [][]string{{"a.example.com", "1.1.1.1"}}, 1, "a.example.com", 0},
+		{"URL形态剥scheme", [][]string{{"https://gwq.example.com", "1.1.1.1"}}, 1, "gwq.example.com", 0},
+		{"URL形态剥路径", [][]string{{"http://a.example.com/login", "1.1.1.1"}}, 1, "a.example.com", 0},
+		{"域名带端口剥端口", [][]string{{"a.example.com:8443", "1.1.1.1"}}, 1, "a.example.com", 0},
+		{"URL形态同域名归并", [][]string{{"https://a.example.com", "1.1.1.1"}, {"a.example.com", "2.2.2.2"}}, 1, "a.example.com", 0},
 		{"列不足丢弃", [][]string{{"x"}}, 0, "", -1},
 		{"混合行", [][]string{
 			{"ok.example.com", "1.1.1.1"},

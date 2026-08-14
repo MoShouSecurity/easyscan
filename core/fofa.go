@@ -108,8 +108,25 @@ func fofaSearchImpl(ctx context.Context, domain, apiKey, proxyURL string, timeou
 	return fofaFilterResults(domain, body.Results), nil
 }
 
+// normalizeFofaHost 归一化 FOFA 的 host 字段为纯域名字面量。
+// FOFA 部分数据源的 host 是 URL 形态（https://gwq.example.com、带路径或端口），
+// 子域名入库必须是纯子域名，剥掉 scheme / 路径 / 端口 / 尾点并转小写。
+func normalizeFofaHost(raw string) string {
+	h := strings.TrimSpace(strings.ToLower(raw))
+	for _, scheme := range []string{"https://", "http://"} {
+		if strings.HasPrefix(h, scheme) {
+			h = strings.TrimPrefix(h, scheme)
+			break
+		}
+	}
+	if i := strings.IndexAny(h, "/:"); i >= 0 {
+		h = h[:i] // 剥路径与端口（host 是域名而非 IP，首个 / 或 : 之后均非域名部分）
+	}
+	return strings.TrimSuffix(h, ".")
+}
+
 // fofaFilterResults 过滤 FOFA 原始结果行（纯函数，便于单测）：
-//   - host 归一化（去空格/小写/去尾点），丢弃空值、裸 IP 与目标域之外的记录
+//   - host 归一化（normalizeFofaHost），丢弃空值、裸 IP 与目标域之外的记录
 //     （domain= 语法会带回 example.com.evil.com 这类前缀绕过结果）
 //   - IP 必须为合法地址（丢弃空值、ip:port 形态）
 //   - port 为 1-65535 时保留（供站点直接探测），否则置 0
@@ -121,7 +138,7 @@ func fofaFilterResults(domain string, rows [][]string) []fofaResult {
 		if len(row) < 2 {
 			continue
 		}
-		host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(row[0])), ".")
+		host := normalizeFofaHost(row[0])
 		if host == "" || net.ParseIP(host) != nil {
 			continue // 空 host 或裸 IP 记录
 		}

@@ -66,3 +66,70 @@ func TestProbePorts(t *testing.T) {
 		t.Fatal("probePorts: 端口全关时应判为不存活")
 	}
 }
+
+// TestScanPortRetryOpen 验证重试探测能检出本地开放端口。
+func TestScanPortRetryOpen(t *testing.T) {
+	ctx := context.Background()
+	ln := listenFreePort(t)
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	if !scanPortRetry(ctx, "127.0.0.1", port, 200*time.Millisecond, 2) {
+		t.Fatal("scanPortRetry 应检出本地开放端口")
+	}
+}
+
+// TestScanPortRetryClosed 验证重试探测不会把已关闭端口判为开放，且重试耗时有界。
+func TestScanPortRetryClosed(t *testing.T) {
+	ctx := context.Background()
+	port := closedPort(t)
+
+	start := time.Now()
+	if scanPortRetry(ctx, "127.0.0.1", port, 50*time.Millisecond, 2) {
+		t.Fatal("scanPortRetry 不应把已关闭端口判为开放")
+	}
+	// 3 次探测（1 初始 + 2 重试），超时递增 50/75/112ms，总耗时不应远超上限。
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("scanPortRetry 耗时 %v，重试超时未按预期收敛", elapsed)
+	}
+}
+
+// TestScanPortRetryCtxCancel 已取消的 ctx 应立即停止重试。
+func TestScanPortRetryCtxCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if scanPortRetry(ctx, "127.0.0.1", 1, 50*time.Millisecond, 2) {
+		t.Fatal("已取消的 ctx 不应检出端口")
+	}
+}
+
+// TestMeasureRTT 验证 RTT 测量：本地 loopback 应测得正耗时，空端口列表返回 0。
+func TestMeasureRTT(t *testing.T) {
+	ctx := context.Background()
+	ln := listenFreePort(t)
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	rtt := measureRTT(ctx, "127.0.0.1", []int{port}, 500*time.Millisecond)
+	if rtt <= 0 || rtt > 500*time.Millisecond {
+		t.Fatalf("measureRTT = %v; want (0, 500ms]", rtt)
+	}
+
+	if rtt := measureRTT(ctx, "127.0.0.1", nil, 100*time.Millisecond); rtt != 0 {
+		t.Fatalf("measureRTT(空端口) = %v; want 0", rtt)
+	}
+}
+
+// TestScanIPPorts 验证并发扫描只检出开放端口（动态超时 + 重试路径）。
+func TestScanIPPorts(t *testing.T) {
+	ctx := context.Background()
+	ln := listenFreePort(t)
+	defer ln.Close()
+	port := ln.Addr().(*net.TCPAddr).Port
+	dead := closedPort(t)
+
+	open := scanIPPorts(ctx, "127.0.0.1", []int{port, dead}, 10, 200*time.Millisecond)
+	if len(open) != 1 || open[0] != port {
+		t.Fatalf("scanIPPorts = %v; want [%d]", open, port)
+	}
+}

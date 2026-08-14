@@ -21,11 +21,74 @@ func scanPort(ctx context.Context, ip string, port int, timeout time.Duration) b
 	return true
 }
 
+// scanPortRetry 对单个 IP:port 做 TCP connect 探测（带重试与递增超时），返回是否开放。
+// 失败时最多重试 retries 次，每次超时在上一次基础上 ×1.5（封顶 3×初始超时），
+// 缓解网络抖动与慢响应端口导致的漏报。
+func scanPortRetry(ctx context.Context, ip string, port int, timeout time.Duration, retries int) bool {
+	if retries <= 0 {
+		retries = 2
+	}
+	t := timeout
+	for i := 0; i <= retries; i++ {
+		if ctx.Err() != nil {
+			return false
+		}
+		if scanPort(ctx, ip, port, t) {
+			return true
+		}
+		if t < timeout*3 {
+			t = t * 3 / 2
+		}
+	}
+	return false
+}
+
+// measureRTT 并发探测 IP 到指定端口的 RTT（每个端口 2 次取最小），用于动态设置扫描超时。
+// 全部失败返回 0（调用方回退到默认超时）。
+func measureRTT(ctx context.Context, ip string, ports []int, probeTimeout time.Duration) time.Duration {
+	ch := make(chan time.Duration, len(ports)*2)
+	var wg sync.WaitGroup
+	for _, p := range ports {
+		wg.Add(1)
+		go func(p int) {
+			defer wg.Done()
+			for i := 0; i < 2; i++ {
+				start := time.Now()
+				if scanPort(ctx, ip, p, probeTimeout) {
+					ch <- time.Since(start)
+				}
+			}
+		}(p)
+	}
+	wg.Wait()
+	close(ch)
+	var best time.Duration
+	for d := range ch {
+		if best == 0 || d < best {
+			best = d
+		}
+	}
+	return best
+}
+
 // scanIPPorts 并发扫描指定 IP 的端口列表，返回开放端口。
+// 先测 RTT 基准动态设置超时（慢网络自动放宽，上限 2×默认超时），
+// 每个端口探测失败自动重试（递增超时），减少慢响应与抖动的漏报。
 func scanIPPorts(ctx context.Context, ip string, ports []int, limit int, timeout time.Duration) []int {
 	if limit <= 0 {
 		limit = 500
 	}
+	to := timeout
+	if rtt := measureRTT(ctx, ip, hostProbePorts, timeout); rtt > 0 {
+		to = rtt * 4
+		if to < 500*time.Millisecond {
+			to = 500 * time.Millisecond
+		}
+		if to > timeout*2 {
+			to = timeout * 2
+		}
+	}
+
 	var open []int
 	var mu sync.Mutex
 
@@ -40,7 +103,7 @@ func scanIPPorts(ctx context.Context, ip string, ports []int, limit int, timeout
 		go func() {
 			defer wg.Done()
 			for p := range jobs {
-				if scanPort(ctx, ip, p, timeout) {
+				if scanPortRetry(ctx, ip, p, to, 2) {
 					mu.Lock()
 					open = append(open, p)
 					mu.Unlock()

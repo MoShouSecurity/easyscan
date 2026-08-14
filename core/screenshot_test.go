@@ -8,6 +8,47 @@ import (
 	"testing"
 )
 
+// TestWebSchemes443First 443 等 TLS 端口 https 优先（即使服务被误判为 http）。
+func TestWebSchemes443First(t *testing.T) {
+	cases := []struct {
+		port    int
+		service string
+		want    string // 期望的第一个 scheme
+	}{
+		{443, "http", "https"},  // nmap 误判 http 也先试 https
+		{443, "https", "https"}, // 正常
+		{8443, "", "https"},     // 空服务按端口
+		{80, "http", "http"},    // 常规 http
+		{8080, "", "http"},      // web 端口默认先 http
+		{22, "ssh", ""},         // 非 web 端口无 scheme
+	}
+	for _, c := range cases {
+		got := webSchemes(c.port, c.service)
+		if c.want == "" {
+			if got != nil {
+				t.Errorf("webSchemes(%d, %q) = %v; want nil", c.port, c.service, got)
+			}
+			continue
+		}
+		if len(got) == 0 || got[0] != c.want {
+			t.Errorf("webSchemes(%d, %q) = %v; want 首个 %s", c.port, c.service, got, c.want)
+		}
+	}
+}
+
+// TestScreenshotCandidatesHTTPS443First http 的 443 端口 URL，https 变体必须排第一。
+func TestScreenshotCandidatesHTTPS443First(t *testing.T) {
+	got := ScreenshotCandidates("http://10.0.0.5:443/")
+	if len(got) == 0 || got[0] != "https://10.0.0.5:443/" {
+		t.Fatalf("ScreenshotCandidates(http://10.0.0.5:443/) = %v; want https 变体优先", got)
+	}
+	// 常规 http URL 仍以原样优先。
+	got = ScreenshotCandidates("http://10.0.0.5/")
+	if len(got) == 0 || got[0] != "http://10.0.0.5/" {
+		t.Fatalf("ScreenshotCandidates(http://10.0.0.5/) = %v; want 原样优先", got)
+	}
+}
+
 // TestScreenshotCapture 诊断 chromedp 是否能找到 Chrome 并截图。
 func TestScreenshotCapture(t *testing.T) {
 	dir := t.TempDir()

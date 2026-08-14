@@ -520,9 +520,12 @@ func probeWebSite(ctx context.Context, ip string, port int, service string, host
 }
 
 // webSchemes 依据端口/服务确定要尝试的协议。
+// 443 等 TLS 端口 https 优先（服务识别误判为 http 也先试 https，失败再回退明文 http）。
 func webSchemes(port int, service string) []string {
 	switch {
-	case service == "https", port == 443, port == 8443, port == 9443:
+	case port == 443 || port == 8443 || port == 9443:
+		return []string{"https", "http"}
+	case service == "https":
 		return []string{"https"}
 	case service == "http":
 		return []string{"http"}

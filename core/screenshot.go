@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/security"
 	"github.com/chromedp/chromedp"
 )
@@ -69,15 +70,43 @@ func (s *Screenshotter) Capture(url string) (string, error) {
 	defer tabCancel()
 
 	var buf []byte
-	cctx, cancel := context.WithTimeout(tabCtx, 25*time.Second)
+	cctx, cancel := context.WithTimeout(tabCtx, 30*time.Second)
 	defer cancel()
+
+	// 网络静默状态：导航前注册监听，记录最近一次网络活动时间，
+	// 供 waitNetworkIdle 判定 SPA 异步加载是否结束。
+	var mu sync.Mutex
+	lastActive := time.Now()
+	markActive := func() {
+		mu.Lock()
+		lastActive = time.Now()
+		mu.Unlock()
+	}
+
 	if err := chromedp.Run(cctx,
 		// 忽略 SSL 证书错误（自签名/过期证书的站点也能截图）。
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			return security.SetIgnoreCertificateErrors(true).Do(ctx)
 		}),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			chromedp.ListenTarget(ctx, func(ev interface{}) {
+				switch ev.(type) {
+				case *network.EventRequestWillBeSent,
+					*network.EventResponseReceived,
+					*network.EventLoadingFinished,
+					*network.EventLoadingFailed:
+					markActive()
+				}
+			})
+			return nil
+		}),
 		chromedp.Navigate(url),
-		chromedp.Sleep(1500*time.Millisecond),
+		// 等 JS 加载完再截图：网络静默 800ms 视为加载结束（SPA 异步请求全部完成），
+		// 最多等 12s，超时不阻塞；再留 600ms 渲染余量。
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			return waitNetworkIdle(ctx, &mu, &lastActive, 12*time.Second, 800*time.Millisecond)
+		}),
+		chromedp.Sleep(600*time.Millisecond),
 		chromedp.CaptureScreenshot(&buf),
 	); err != nil {
 		return "", err
@@ -97,6 +126,26 @@ func (s *Screenshotter) Close() {
 func hashURL(u string) string {
 	h := sha256.Sum256([]byte(u))
 	return hex.EncodeToString(h[:])[:16]
+}
+
+// waitNetworkIdle 等待网络静默（静默窗口 quiet 内无新请求），最多等 maxWait。
+// lastActive 由调用方在导航前注册的网络事件监听持续更新。
+// 到达 maxWait 仍未静默也不报错（继续截图），由外层 context 超时兜底。
+func waitNetworkIdle(ctx context.Context, mu *sync.Mutex, lastActive *time.Time, maxWait, quiet time.Duration) error {
+	deadline := time.Now().Add(maxWait)
+	for {
+		mu.Lock()
+		idle := time.Since(*lastActive) >= quiet
+		mu.Unlock()
+		if idle || time.Now().After(deadline) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
 }
 
 // DetectChromePath 探测本机 Chrome/Chromium/Edge 可执行文件路径，找不到返回空串。
@@ -149,6 +198,10 @@ func ScreenshotCandidates(u string) []string {
 		out = append(out, s)
 	}
 
+	// 443 端口的 http URL：https 变体优先（TLS 端口应直接截 https 的图）。
+	if strings.HasPrefix(u, "http://") && strings.Contains(u, ":443/") {
+		add(strings.Replace(u, "http://", "https://", 1))
+	}
 	add(u)
 
 	// 去掉默认端口（:80 / :443）。

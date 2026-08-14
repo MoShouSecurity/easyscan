@@ -46,7 +46,7 @@ func findMasscan() string {
 	return ""
 }
 
-// PingScan 用 masscan 纯 ICMP echo 探测（-PE）主机存活，返回存活 IP 列表。
+// PingScan 用 masscan 纯 ICMP echo 探测（--ping）主机存活，返回存活 IP 列表。
 // 目标为原始 IP/CIDR 条目（不展开，避免大网段展开成海量参数）。
 // 探测失败（驱动缺失 / 无权限 / 非零退出）时返回错误，由调用方降级。
 func (m *MasscanScanner) PingScan(ctx context.Context, targets []string) ([]string, error) {
@@ -59,10 +59,11 @@ func (m *MasscanScanner) PingScan(ctx context.Context, targets []string) ([]stri
 	}
 	defer cleanup()
 
-	// -PE 纯 ICMP echo；--retries 3 减少丢包漏报；
+	// --ping 纯 ICMP echo（此前误用 nmap 语法 -PE，masscan 直接报 unsupported
+	// option 退出，探测从未真正执行）；--retries 3 减少丢包漏报；
 	// --wait 5 收尾等待：局域网设备（WiFi 节能唤醒/ARP 慢）响应常超 2s，
 	// 等待过短会随机漏报导致每次扫描结果不同（5s 是准确性与耗时的折中）。
-	args := []string{"-PE", "--rate", fmt.Sprintf("%d", m.rate), "--retries", "3", "--wait", "5", "-oJ", "-"}
+	args := []string{"--ping", "--rate", fmt.Sprintf("%d", m.rate), "--retries", "3", "--wait", "5", "-oJ", "-"}
 	args = append(args, targs...)
 
 	out, err := m.run(ctx, args...)

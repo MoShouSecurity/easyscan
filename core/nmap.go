@@ -177,7 +177,9 @@ func (n *NmapScanner) Scan(ctx context.Context, targets []string, portMode, port
 	}
 	defer cleanup()
 
-	args := []string{"-sT", "-sV", "-Pn", "--open", "-T4"}
+	// --host-timeout 仅作单主机兜底上限（防异常挂死，正常主机远达不到），
+	// 不限制探测重试：丢包链路上 nmap 默认重试（10 次）是准确性的保障。
+	args := []string{"-sT", "-sV", "-Pn", "--open", "-T4", "--host-timeout", "300s"}
 	args = append(args, nmapPortArgs(portMode, portSpec)...)
 	args = append(args, "-oX", "-")
 	args = append(args, targs...)

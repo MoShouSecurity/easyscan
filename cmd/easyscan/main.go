@@ -3,10 +3,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"easyscan/core"
 )
@@ -20,6 +22,8 @@ func main() {
 		noBrute = flag.Bool("no-brute", false, "关闭子域名字典爆破")
 		noShot  = flag.Bool("no-shot", false, "关闭站点截图")
 		shotDir = flag.String("shot-dir", "screenshots", "截图保存目录")
+		bench   = flag.Bool("bench", false, "端口扫描基准对比（nmap vs 纯 Go），不写库")
+		jsonOut = flag.Bool("json", false, "benchmark 输出 JSON（供脚本消费）")
 	)
 	flag.Parse()
 
@@ -27,6 +31,27 @@ func main() {
 		fmt.Fprintln(os.Stderr, "用法: easyscan -target example.com [-type domain] [-ports top100]")
 		flag.Usage()
 		os.Exit(2)
+	}
+
+	if *bench {
+		opts := core.DefaultScanOptions()
+		opts.PortMode = *ports
+		report, err := core.RunPortBenchmark(context.Background(), *target, *ports, "", opts)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "基准对比失败: %v\n", err)
+			os.Exit(1)
+		}
+		if *jsonOut {
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(report); err != nil {
+				fmt.Fprintf(os.Stderr, "输出 JSON 失败: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
+		printBenchmark(report)
+		return
 	}
 
 	store, err := core.OpenStore(*db)
@@ -61,6 +86,43 @@ func main() {
 	}
 
 	printSummary(store, *target, taskType)
+}
+
+// printBenchmark 输出基准对比的人类可读摘要。
+func printBenchmark(r *core.BenchmarkReport) {
+	fmt.Printf("=== 端口扫描基准对比: %s (%s, %d 端口) ===\n\n", r.Target, r.PortMode, r.Ports)
+	fmt.Printf("nmap   : 开放端口 %4d, 耗时 %v\n", r.NmapOpen, r.NmapTime.Round(time.Millisecond))
+	fmt.Printf("纯 Go : 开放端口 %4d, 耗时 %v\n", r.GoOpen, r.GoTime.Round(time.Millisecond))
+	fmt.Printf("\n共同检出  : %d\n", r.Common)
+	fmt.Printf("nmap 独有 : %d  (纯 Go 漏报)\n", r.NmapOnly)
+	fmt.Printf("纯 Go 独有: %d  (纯 Go 误报)\n", r.GoOnly)
+	fmt.Printf("召回率    : %.1f%%  (纯 Go 相对 nmap)\n", r.Recall*100)
+	fmt.Printf("误报率    : %.1f%%\n", r.FalsePos*100)
+
+	var miss, fp []core.PortBenchResult
+	for _, d := range r.Details {
+		if d.Nmap && !d.PureGo {
+			miss = append(miss, d)
+		} else if !d.Nmap && d.PureGo {
+			fp = append(fp, d)
+		}
+	}
+	if len(miss) > 0 {
+		fmt.Println("\n--- nmap 独有端口（纯 Go 漏报）---")
+		for _, d := range miss {
+			pv := ""
+			if d.Product != "" {
+				pv = fmt.Sprintf("  [%s %s]", d.Product, d.Version)
+			}
+			fmt.Printf("  %s:%d%s\n", d.IP, d.Port, pv)
+		}
+	}
+	if len(fp) > 0 {
+		fmt.Println("\n--- 纯 Go 独有端口（疑似误报）---")
+		for _, d := range fp {
+			fmt.Printf("  %s:%d\n", d.IP, d.Port)
+		}
+	}
 }
 
 func printSummary(store *core.Store, target string, typ core.TaskType) {

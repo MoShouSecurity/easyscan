@@ -26,14 +26,11 @@ type Screenshotter struct {
 
 // NewScreenshotter 构造截图器。chromePath 为空时由 chromedp 自动探测 Chrome。
 func NewScreenshotter(chromePath, dir string) (*Screenshotter, error) {
-	// CGPreflightScreenCaptureAccess 在 macOS 13+ 有误报（已授权也可能返回 false），
-	// 因此不据此阻断截图，仅打印提示；真正失败会在 Capture 时暴露。
-	if !hasScreenCapturePermission() {
-		println("提示: 屏幕录制权限预检未通过，若截图失败请到 系统设置 → 隐私与安全性 → 屏幕录制 中授权")
-	}
-
 	opts := []chromedp.ExecAllocatorOption{
-		chromedp.Headless,
+		// headless=new：Chromium 新版无头模式，完全离屏渲染。
+		// 进程不触碰屏幕采集 API（CGWindowList/CGDisplay 等），不触发
+		// macOS 屏幕录制（TCC）权限弹窗——与 Goby（Electron capturePage）同理。
+		chromedp.Flag("headless", "new"),
 		chromedp.NoSandbox,
 		chromedp.DisableGPU,
 		chromedp.WindowSize(1366, 768),

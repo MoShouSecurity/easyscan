@@ -583,6 +583,9 @@ func (s *Store) Search(q string, limit int) ([]SearchResult, error) {
 			}
 		}
 		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err // 迭代错误不静默，避免返回截断结果
+		}
 	}
 	return out, nil
 }

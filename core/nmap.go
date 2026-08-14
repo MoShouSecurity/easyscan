@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
 	"fmt"
@@ -222,7 +223,20 @@ func (n *NmapScanner) run(ctx context.Context, prefix []string, args ...string) 
 	full = append(full, args...)
 	cmd := exec.CommandContext(ctx, full[0], full[1:]...)
 	HideCmdWindow(cmd)
-	return cmd.Output()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		// 附上 stderr 摘要（权限/参数错误等诊断信息，此前用户只看到 exit status 1）。
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			if len(msg) > 300 {
+				msg = msg[:300]
+			}
+			return nil, fmt.Errorf("%w: %s", err, msg)
+		}
+		return nil, err
+	}
+	return out, nil
 }
 
 // ---- nmap XML 解析 ----

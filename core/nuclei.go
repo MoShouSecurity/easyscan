@@ -57,7 +57,7 @@ func runNuclei(ctx context.Context, site Site, taskID string, timeout time.Durat
 			if err != nil {
 				continue
 			}
-			body := readBodyLimited(resp.Body, 256<<10)
+			body, _ := readBodyLimited(resp.Body, 256<<10)
 			resp.Body.Close()
 			if resp.StatusCode != http.StatusOK {
 				continue
@@ -166,7 +166,7 @@ func runNucleiYAML(ctx context.Context, site Site, taskID string, templates []Nu
 	base := strings.TrimSuffix(site.URL, "/")
 	var out []Leak
 	for _, tpl := range templates {
-		if url, ok := matchNucleiTemplate(ctx, tpl, base, timeout); ok {
+		if url, status, ok := matchNucleiTemplate(ctx, tpl, base, timeout); ok {
 			name := tpl.Info.Name
 			if name == "" {
 				name = tpl.ID
@@ -177,7 +177,7 @@ func runNucleiYAML(ctx context.Context, site Site, taskID string, templates []Nu
 				URL:        url,
 				Path:       firstPath(tpl),
 				Type:       "nuclei:" + name,
-				StatusCode: 200,
+				StatusCode: status, // 真实响应状态码（此前硬编码 200）
 				CreatedAt:  nowUnix(),
 			})
 		}
@@ -194,8 +194,8 @@ func firstPath(t NucleiTemplate) string {
 	return ""
 }
 
-// matchNucleiTemplate 执行单个模板，命中返回命中的 URL。
-func matchNucleiTemplate(ctx context.Context, tpl NucleiTemplate, base string, timeout time.Duration) (string, bool) {
+// matchNucleiTemplate 执行单个模板，命中返回命中的 URL 与响应状态码。
+func matchNucleiTemplate(ctx context.Context, tpl NucleiTemplate, base string, timeout time.Duration) (string, int, bool) {
 	client := defaultHTTPClient(timeout)
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
@@ -220,14 +220,14 @@ func matchNucleiTemplate(ctx context.Context, tpl NucleiTemplate, base string, t
 			if err != nil {
 				continue
 			}
-			body := readBodyLimited(resp.Body, 512<<10)
+			body, _ := readBodyLimited(resp.Body, 512<<10)
 			resp.Body.Close()
 			if evalMatchers(req, resp, body) {
-				return url, true
+				return url, resp.StatusCode, true
 			}
 		}
 	}
-	return "", false
+	return "", 0, false
 }
 
 // expandPath 替换模板变量（MVP 支持 {{BaseURL}} 与 {{RootURL}}）。

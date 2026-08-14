@@ -97,7 +97,7 @@ func probeSite(ctx context.Context, ip string, port int, scheme string, hostname
 		url = resp.Request.URL.String()
 	}
 
-	body := readBodyLimited(resp.Body, 1<<20)
+	body, _ := readBodyLimited(resp.Body, 1<<20) // 读取失败视为无内容，指纹匹配自然落空
 	site := Site{
 		ID:         newID(),
 		IP:         ip,

@@ -130,11 +130,16 @@ func detectLeaks(ctx context.Context, site Site, taskID string, timeout time.Dur
 			resp.Body.Close()
 			continue
 		}
-		body := readBodyLimited(resp.Body, 256<<10)
+		body, _ := readBodyLimited(resp.Body, 256<<10)
 		resp.Body.Close()
 
 		lower := strings.ToLower(string(body))
 		if r.Sig != "" && !strings.Contains(lower, strings.ToLower(r.Sig)) {
+			continue
+		}
+		// 空签名规则（.DS_Store/.env 等仅判断 200）在 SPA/软 404 站点任意路径
+		// 都返回 200，会产生成片误报；要求响应体有实际内容（≥64 字节）抑制。
+		if r.Sig == "" && len(body) < 64 {
 			continue
 		}
 		out = append(out, Leak{

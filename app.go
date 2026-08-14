@@ -245,11 +245,16 @@ func (a *App) PauseTask(id string) error {
 	if a.sched == nil {
 		return fmt.Errorf("调度器未初始化")
 	}
-	a.sched.CancelTask(id)
+	// 先读状态：仅运行中任务可暂停，避免取消与自然完成竞态时
+	// 把刚完成的 finished 任务改写为 paused。
 	t, err := a.store.GetTask(id)
 	if err != nil {
 		return err
 	}
+	if t.Status != core.TaskRunning {
+		return fmt.Errorf("任务不在运行中（当前状态: %s）", t.Status)
+	}
+	a.sched.CancelTask(id)
 	t.Status = core.TaskPaused
 	t.Message = "已暂停"
 	return a.store.UpdateTask(t)
@@ -424,7 +429,12 @@ func openFile(path string) error {
 	default:
 		cmd = exec.Command("xdg-open", path)
 	}
-	return cmd.Start()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// 异步回收进程，避免僵尸进程（open/xdg-open 启动后即分离）。
+	go func() { _ = cmd.Wait() }()
+	return nil
 }
 
 // ---- 截图 ----

@@ -76,7 +76,20 @@ func (m *MasscanScanner) PingScan(ctx context.Context, targets []string) ([]stri
 func (m *MasscanScanner) run(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, m.binary, args...)
 	HideCmdWindow(cmd)
-	return cmd.Output()
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		// 附上 stderr 摘要（权限/参数错误等诊断信息）。
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			if len(msg) > 300 {
+				msg = msg[:300]
+			}
+			return nil, fmt.Errorf("%w: %s", err, msg)
+		}
+		return nil, err
+	}
+	return out, nil
 }
 
 // ipRegex 兜底提取 masscan 输出中的 ip 字段。

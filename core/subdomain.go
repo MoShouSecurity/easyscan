@@ -201,10 +201,10 @@ func defaultHTTPClient(timeout time.Duration) *http.Client {
 }
 
 // readBodyLimited 限制读取大小，避免超大响应耗尽内存。
-func readBodyLimited(r io.Reader, limit int64) []byte {
+// 返回读取错误（截断响应调用方应视为不完整，不参与精确匹配）。
+func readBodyLimited(r io.Reader, limit int64) ([]byte, error) {
 	if limit <= 0 {
 		limit = 1 << 20 // 1MB
 	}
-	b, _ := io.ReadAll(io.LimitReader(r, limit))
-	return b
+	return io.ReadAll(io.LimitReader(r, limit))
 }

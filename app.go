@@ -46,7 +46,7 @@ func (a *App) startup(ctx context.Context) {
 	}
 	dir = filepath.Join(dir, "EasyScan")
 	a.configDir = dir
-	_ = os.MkdirAll(dir, 0o755)
+	_ = os.MkdirAll(dir, 0o700) // 配置目录 0700：含 config.yaml（FOFA key）与数据库
 	dbPath := filepath.Join(dir, "easyscan.db")
 
 	// 加载配置（不存在则写入默认配置）。
@@ -508,7 +508,7 @@ func (a *App) ExportTask(taskID string) (string, error) {
 	w.Flush()
 
 	dir := filepath.Join(a.configDir, "exports")
-	_ = os.MkdirAll(dir, 0o755)
+	_ = os.MkdirAll(dir, 0o700) // 配置目录 0700：含 config.yaml（FOFA key）与数据库
 	path := filepath.Join(dir, "task_"+taskID+".csv")
 	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
 		return "", err

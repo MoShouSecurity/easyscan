@@ -3,6 +3,7 @@ package core
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -38,6 +39,10 @@ func OpenStore(path string) (*Store, error) {
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
+	}
+	// 数据库含扫描资产信息，文件权限收紧为 0600（SQLite 默认按 umask 创建）。
+	if path != "" {
+		_ = os.Chmod(path, 0o600)
 	}
 	return s, nil
 }

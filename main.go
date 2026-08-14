@@ -29,7 +29,7 @@ func main() {
 		}
 		output := strings.Join(subs, "\n")
 		if len(os.Args) >= 5 && os.Args[3] == "--ksubdomain-out" {
-			if err := os.WriteFile(os.Args[4], []byte(output), 0o644); err != nil {
+			if err := os.WriteFile(os.Args[4], []byte(output), 0o600); err != nil {
 				fmt.Fprintln(os.Stderr, err)
 				os.Exit(1)
 			}

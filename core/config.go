@@ -155,7 +155,8 @@ func (c Config) Save(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	// 0o600：配置文件含 FOFA key 等敏感信息，仅本人可读写。
+	return os.WriteFile(path, data, 0o600)
 }
 
 // ToOptions 将全局配置的默认参数合入任务策略。

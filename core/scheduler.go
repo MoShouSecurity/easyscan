@@ -160,7 +160,12 @@ func (s *Scheduler) run(t *Task) {
 
 	if err != nil {
 		if ctx.Err() != nil {
-			return // 被暂停取消，状态由 PauseTask 处理
+			if s.ctx.Err() != nil {
+				// 调度器整体关闭（非单任务暂停）：标记 paused，
+				// 与启动时的 MarkInterruptedTasks 兜底一致。
+				update(TaskPaused, t.Progress, "程序关闭，任务已暂停")
+			}
+			return // 单任务暂停取消，状态由 PauseTask 处理
 		}
 		update(TaskFailed, 100, err.Error())
 		return

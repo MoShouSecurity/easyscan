@@ -103,6 +103,7 @@ func targetListArgs(targets []string) (args []string, cleanup func(), err error)
 }
 
 // nmapPortArgs 根据端口模式生成 nmap 的端口参数。custom 模式透传用户端口规范（范围语法）。
+// 未知模式默认 top100，与纯 Go 路径 portList 的默认值一致（结果可比）。
 func nmapPortArgs(mode, spec string) []string {
 	switch mode {
 	case "top100":
@@ -113,8 +114,10 @@ func nmapPortArgs(mode, spec string) []string {
 		return []string{"-p", "1-65535"}
 	case "custom":
 		return []string{"-p", spec}
-	default: // test
+	case "test":
 		return []string{"-p", "22,80,443,3389,445,8080"}
+	default:
+		return []string{"--top-ports", "100"}
 	}
 }
 

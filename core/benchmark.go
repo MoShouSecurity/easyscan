@@ -102,7 +102,9 @@ func RunPortBenchmark(ctx context.Context, target, portMode, portSpec string, op
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		ip, portStr, _ := strings.Cut(k, ":")
+		// 键格式 "ip:port"；IPv6 形如 "[::1]:80"，按最后一个冒号切分。
+		i := strings.LastIndex(k, ":")
+		ip, portStr := strings.Trim(k[:i], "[]"), k[i+1:]
 		port, _ := strconv.Atoi(portStr)
 		d := PortBenchResult{IP: ip, Port: port, PureGo: goSet[k]}
 		if r, ok := nmapSet[k]; ok {

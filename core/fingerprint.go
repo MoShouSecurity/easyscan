@@ -3,11 +3,11 @@ package core
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
 	"html"
 	"net"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -55,7 +55,8 @@ func probeSite(ctx context.Context, ip string, port int, scheme string, hostname
 	if hostname != "" {
 		host = hostname
 	}
-	url := fmt.Sprintf("%s://%s:%d/", scheme, host, port)
+	// IPv6 地址需 [::1]:80 形式，net.JoinHostPort 统一处理（防非法 URL 静默失败）。
+	url := scheme + "://" + net.JoinHostPort(host, strconv.Itoa(port)) + "/"
 
 	transport := &http.Transport{
 		// 侦察场景不校验证书链，避免自签名/过期证书阻断指纹识别（如 80 重定向到 https）。

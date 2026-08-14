@@ -1,5 +1,6 @@
-//go:build !windows
-
+// Package-level ksubdomain 无状态爆破集成（三端共用）。
+// Windows 上 gopacket/pcap 通过纯 Go 方式动态加载 Npcap DLL（运行时需安装 Npcap 驱动），
+// macOS/Linux 使用 libpcap（CGO）。运行权限不足或驱动缺失时由调用方降级为纯 Go 字典爆破。
 package core
 
 import (

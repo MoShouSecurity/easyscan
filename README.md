@@ -11,10 +11,10 @@ Easy Scan 是一款**跨平台桌面资产侦察工具**——单二进制 + SQL
 ## 功能特性
 
 ### 资产发现
-- **子域名枚举**：三层引擎
+- **子域名枚举**：三层引擎（macOS / Linux / Windows 三端一致）
   - `subfinder` 被动收集（多公开数据源，证书透明度 / 搜索引擎等）
-  - `ksubdomain` 无状态主动爆破（10 万字典，最高 160 万包/秒）
-  - 纯 Go 字典爆破（无权限 / Windows 时的兜底）
+  - `ksubdomain` 无状态主动爆破（10 万字典，最高 160 万包/秒，SDK 集成三端共用）
+  - 纯 Go 字典爆破（无权限 / 缺驱动时的兜底）
 - **DNS 解析**：并发解析 A 记录，IPv4 / IPv6
 - **端口扫描**：存活探测三级降级（masscan 纯 ICMP → nmap 纯 ICMP → 纯 Go TCP）+ nmap 服务/版本识别，端口模式 `test / top100 / top1000 / all / custom` 五档（custom 支持范围语法，如 `1-1000,8080`）
 - **服务识别**：nmap -sV 产品/版本（降级为 banner 抓取 + 常见服务指纹）
@@ -62,8 +62,8 @@ core/              纯 Go 引擎（GUI 无关，可独立运行 + 单测）
   config.go        任务策略 + 全局配置（config.yaml）
   subdomain.go     子域名枚举编排（subfinder + ksubdomain + 纯 Go 兜底）
   subfinder.go     subfinder 被动收集
-  ksubdomain.go    ksubdomain 无状态爆破（macOS/Linux）
-  privilege.go     提权机制（sudo 缓存 / osascript / pkexec）
+  ksubdomain.go    ksubdomain 无状态爆破（三端 SDK 集成）
+  privilege.go     提权机制（sudo 缓存 / osascript / pkexec / Windows UAC）
   dns.go           并发 DNS 解析
   masscan.go       masscan 纯 ICMP 存活探测（首选，降级 nmap / 纯 Go TCP）
   portscan.go      纯 Go TCP 扫描 + banner 服务识别
@@ -170,7 +170,9 @@ api_keys: {}                # 第三方数据源 Token
 | 泄漏 | 30+ 敏感路径 + 自定义字典 |
 | POC | 内置模板 + 官方 nuclei YAML 模板 |
 
-**提权说明**：ksubdomain 无状态爆破需要 root 权限（原始 socket）。桌面端会自动弹系统授权框（macOS 管理员授权 / Linux PolicyKit），授权后利用 sudo timestamp 缓存，**短时间内重复扫描不重复弹框**（默认 5 分钟，可在 sudoers 的 `timestamp_timeout` 调整）。用户取消授权则自动降级为纯 Go 字典爆破，不影响扫描。
+**提权说明**：ksubdomain 无状态爆破需要 root/管理员权限（原始 socket）。桌面端会自动弹系统授权框——macOS 管理员授权 / Linux PolicyKit / **Windows UAC（ShellExecuteExW runas）**。macOS/Linux 授权后利用 sudo timestamp 缓存，**短时间内重复扫描不重复弹框**（默认 5 分钟，可在 sudoers 的 `timestamp_timeout` 调整）；Windows 已是管理员则直接执行。用户取消授权则自动降级为纯 Go 字典爆破，不影响扫描。
+
+> **Windows 依赖**：ksubdomain 爆破需安装 [Npcap](https://npcap.com/) 驱动（WinPcap 可能无效），未安装时自动降级为纯 Go 字典爆破。gopacket 的 Windows 实现为纯 Go 动态加载 Npcap DLL（`third_party/gopacket` 补齐了上游缺失的 ARM64 结构定义），交叉编译无需 mingw/Npcap SDK。
 
 ---
 

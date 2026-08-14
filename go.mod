@@ -2,6 +2,10 @@ module easyscan
 
 go 1.26
 
+// gopacket v1.1.19 的 pcap 包缺少 defs_windows_arm64.go（Windows ARM64 结构体定义），
+// 本地副本补齐该文件以支持 windows/arm64 编译（LLP64 布局与 AMD64 一致）。
+replace github.com/google/gopacket => ./third_party/gopacket
+
 require (
 	github.com/boy-hack/ksubdomain/v2 v2.4.0
 	github.com/chromedp/cdproto v0.0.0-20260714215040-dc233986426f
@@ -9,6 +13,7 @@ require (
 	github.com/google/gopacket v1.1.19
 	github.com/projectdiscovery/subfinder/v2 v2.15.0
 	github.com/wailsapp/wails/v2 v2.14.0
+	golang.org/x/sys v0.47.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.56.0
 )
@@ -142,7 +147,6 @@ require (
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/oauth2 v0.27.0 // indirect
 	golang.org/x/sync v0.21.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/term v0.44.0 // indirect
 	golang.org/x/text v0.39.0 // indirect
 	golang.org/x/time v0.8.0 // indirect

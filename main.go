@@ -5,6 +5,7 @@ import (
 	"embed"
 	"fmt"
 	"os"
+	"strings"
 
 	"easyscan/core"
 
@@ -17,16 +18,24 @@ import (
 var assets embed.FS
 
 func main() {
-	// helper 模式：被提权机制以 root 重新执行，用 ksubdomain 枚举并输出结果到 stdout。
+	// helper 模式：被提权机制重新执行（macOS/Linux sudo/osascript/pkexec，Windows UAC runas），
+	// 用 ksubdomain 枚举子域名。默认输出到 stdout；Windows UAC 提权进程无法继承 stdout，
+	// 通过 --ksubdomain-out <path> 将结果写入临时文件供父进程读取。
 	if len(os.Args) >= 3 && os.Args[1] == "--ksubdomain-enum" {
 		subs, err := core.EnumerateWithKsubdomain(context.Background(), os.Args[2])
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
-		for _, s := range subs {
-			fmt.Println(s)
+		output := strings.Join(subs, "\n")
+		if len(os.Args) >= 5 && os.Args[3] == "--ksubdomain-out" {
+			if err := os.WriteFile(os.Args[4], []byte(output), 0o644); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			return
 		}
+		fmt.Println(output)
 		return
 	}
 

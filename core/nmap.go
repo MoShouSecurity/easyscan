@@ -131,7 +131,7 @@ func (n *NmapScanner) PingSweep(ctx context.Context, targets []string) []string 
 	}
 	defer cleanup()
 	args := append([]string{"-sn", "-PE", "--disable-arp-ping", "-T4"}, targs...)
-	out, err := n.run(ctx, args...)
+	out, err := n.run(ctx, nil, args...)
 	if err != nil || len(out) == 0 {
 		return nil
 	}
@@ -167,6 +167,8 @@ func parseNmapReportIP(line string) string {
 
 // Scan 对目标执行端口扫描 + 服务/版本识别，返回解析后的主机结果。
 // -Pn 跳过主机发现：前面已单独做过 IP 存活确认，且禁 ping 的主机也能扫到。
+// 扫描方式优先 SYN 半开（-sS，更快更准确）：当前进程有特权或 sudo 缓存可用时直接使用；
+// 不可用或 -sS 运行失败（如 Windows 缺 Npcap 驱动）时降级 TCP connect（-sT）。
 // portSpec 仅在 custom 模式使用（端口范围语法，如 1-1000,8080）。
 func (n *NmapScanner) Scan(ctx context.Context, targets []string, portMode, portSpec string) ([]NmapHost, error) {
 	targs, cleanup, err := targetListArgs(targets)
@@ -180,15 +182,39 @@ func (n *NmapScanner) Scan(ctx context.Context, targets []string, portMode, port
 	args = append(args, "-oX", "-")
 	args = append(args, targs...)
 
-	out, err := n.run(ctx, args...)
+	syn := false
+	prefix, canSyn := nmapSynElevation()
+	if canSyn {
+		synArgs := append([]string{"-sS"}, args[1:]...)
+		if out, err := n.run(ctx, prefix, synArgs...); err == nil {
+			return n.parseHosts(out, true)
+		}
+		// -sS 运行失败（驱动缺失 / 权限不足），降级 -sT 无提权重试。
+	}
+
+	out, err := n.run(ctx, nil, args...)
 	if err != nil {
 		return nil, err
 	}
-	return parseNmapXML(out)
+	return n.parseHosts(out, syn)
 }
 
-func (n *NmapScanner) run(ctx context.Context, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, n.binary, args...)
+// parseHosts 解析 nmap XML 输出并标注扫描方式。
+func (n *NmapScanner) parseHosts(out []byte, syn bool) ([]NmapHost, error) {
+	hosts, err := parseNmapXML(out)
+	if err != nil {
+		return nil, err
+	}
+	for i := range hosts {
+		hosts[i].Syn = syn
+	}
+	return hosts, nil
+}
+
+func (n *NmapScanner) run(ctx context.Context, prefix []string, args ...string) ([]byte, error) {
+	full := append(append([]string{}, prefix...), n.binary)
+	full = append(full, args...)
+	cmd := exec.CommandContext(ctx, full[0], full[1:]...)
 	HideCmdWindow(cmd)
 	return cmd.Output()
 }
@@ -198,6 +224,7 @@ func (n *NmapScanner) run(ctx context.Context, args ...string) ([]byte, error) {
 // NmapHost 解析后的 nmap 主机结果。
 type NmapHost struct {
 	IP    string
+	Syn   bool // 是否由 SYN 半开扫描（-sS）发现
 	Ports []NmapPortResult
 }
 

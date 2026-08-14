@@ -317,7 +317,9 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 				}
 				for _, p := range h.Ports {
 					conf := ConfidenceNmap
-					if p.Product != "" || p.Version != "" {
+					if h.Syn {
+						conf = ConfidenceSyn
+					} else if p.Product != "" || p.Version != "" {
 						conf = ConfidenceNmapV
 					}
 					rec := Port{
@@ -343,7 +345,14 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 					_ = e.store.UpsertPort(rec)
 				}
 			}
-			report("端口扫描", fmt.Sprintf("nmap 扫描完成，识别 %d 个 IP", len(hosts)), base+span)
+			mode := "TCP connect"
+			for _, h := range hosts {
+				if h.Syn {
+					mode = "SYN 半开"
+					break
+				}
+			}
+			report("端口扫描", fmt.Sprintf("nmap %s 扫描完成，识别 %d 个 IP", mode, len(hosts)), base+span)
 			return mapToSites(siteMap)
 		}
 		report("端口扫描", "nmap 扫描失败，降级纯 Go 扫描: "+err.Error(), base+span/10)

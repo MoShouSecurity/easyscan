@@ -316,17 +316,22 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 					}
 				}
 				for _, p := range h.Ports {
+					conf := ConfidenceNmap
+					if p.Product != "" || p.Version != "" {
+						conf = ConfidenceNmapV
+					}
 					rec := Port{
-						ID:        newID(),
-						IP:        h.IP,
-						Port:      p.Port,
-						Protocol:  p.Protocol,
-						Service:   p.Service,
-						Product:   p.Product,
-						Version:   p.Version,
-						Title:     p.Title,
-						TaskID:    taskID,
-						CreatedAt: nowUnix(),
+						ID:         newID(),
+						IP:         h.IP,
+						Port:       p.Port,
+						Protocol:   p.Protocol,
+						Service:    p.Service,
+						Product:    p.Product,
+						Version:    p.Version,
+						Title:      p.Title,
+						Confidence: conf,
+						TaskID:     taskID,
+						CreatedAt:  nowUnix(),
 					}
 					// Web 站点走指纹流程，获取标题与 CMS。
 					if site, ok := probeWebSite(ctx, h.IP, p.Port, p.Service, hostname, e.opts.Timeout); ok {
@@ -360,14 +365,15 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 		for _, p := range open {
 			service, banner := grabBanner(ctx, ip, p, e.opts.Timeout)
 			rec := Port{
-				ID:        newID(),
-				IP:        ip,
-				Port:      p,
-				Protocol:  "tcp",
-				Service:   service,
-				Banner:    strings.TrimSpace(banner),
-				TaskID:    taskID,
-				CreatedAt: nowUnix(),
+				ID:         newID(),
+				IP:         ip,
+				Port:       p,
+				Protocol:   "tcp",
+				Service:    service,
+				Banner:     strings.TrimSpace(banner),
+				Confidence: ConfidencePureGo,
+				TaskID:     taskID,
+				CreatedAt:  nowUnix(),
 			}
 			if site, ok := probeWebSite(ctx, ip, p, service, hostname, e.opts.Timeout); ok {
 				site.TaskID = taskID

@@ -134,6 +134,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 		{"ports", "task_id", "TEXT DEFAULT ''"},
 		{"ports", "product", "TEXT DEFAULT ''"},
 		{"ports", "version", "TEXT DEFAULT ''"},
+		{"ports", "confidence", "INTEGER DEFAULT 0"},
 		{"sites", "task_id", "TEXT DEFAULT ''"},
 		{"sites", "screenshot", "TEXT DEFAULT ''"},
 		{"tasks", "stage", "TEXT DEFAULT ''"},
@@ -183,10 +184,11 @@ func (s *Store) UpsertIP(ip IP) error {
 func (s *Store) UpsertPort(p Port) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// 置信度取新旧最大值：同一端口被多种方式扫描时保留更可信的结果。
 	_, err := s.db.Exec(
-		`INSERT INTO ports(id, ip, port, protocol, service, product, version, banner, title, task_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)
-		 ON CONFLICT(ip, port, protocol) DO UPDATE SET service=excluded.service, product=excluded.product, version=excluded.version, banner=excluded.banner, title=excluded.title, task_id=excluded.task_id`,
-		p.ID, p.IP, p.Port, p.Protocol, p.Service, p.Product, p.Version, p.Banner, p.Title, p.TaskID, p.CreatedAt)
+		`INSERT INTO ports(id, ip, port, protocol, service, product, version, banner, title, confidence, task_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+		 ON CONFLICT(ip, port, protocol) DO UPDATE SET service=excluded.service, product=excluded.product, version=excluded.version, banner=excluded.banner, title=excluded.title, confidence=MAX(confidence, excluded.confidence), task_id=excluded.task_id`,
+		p.ID, p.IP, p.Port, p.Protocol, p.Service, p.Product, p.Version, p.Banner, p.Title, p.Confidence, p.TaskID, p.CreatedAt)
 	return err
 }
 
@@ -388,7 +390,7 @@ func (s *Store) ListPorts(limit int) ([]Port, error) {
 	if limit <= 0 {
 		limit = 500
 	}
-	rows, err := s.db.Query(`SELECT id, ip, port, protocol, service, product, version, banner, title, task_id, created_at FROM ports ORDER BY ip, port LIMIT ?`, limit)
+	rows, err := s.db.Query(`SELECT id, ip, port, protocol, service, product, version, banner, title, confidence, task_id, created_at FROM ports ORDER BY ip, port LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -420,7 +422,7 @@ func (s *Store) ListPortsByTask(taskID string, limit int) ([]Port, error) {
 	if limit <= 0 {
 		limit = 2000
 	}
-	rows, err := s.db.Query(`SELECT id, ip, port, protocol, service, product, version, banner, title, task_id, created_at FROM ports WHERE task_id=? ORDER BY ip, port LIMIT ?`, taskID, limit)
+	rows, err := s.db.Query(`SELECT id, ip, port, protocol, service, product, version, banner, title, confidence, task_id, created_at FROM ports WHERE task_id=? ORDER BY ip, port LIMIT ?`, taskID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -432,7 +434,7 @@ func scanPorts(rows *sql.Rows) ([]Port, error) {
 	out := make([]Port, 0)
 	for rows.Next() {
 		var p Port
-		if err := rows.Scan(&p.ID, &p.IP, &p.Port, &p.Protocol, &p.Service, &p.Product, &p.Version, &p.Banner, &p.Title, &p.TaskID, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.IP, &p.Port, &p.Protocol, &p.Service, &p.Product, &p.Version, &p.Banner, &p.Title, &p.Confidence, &p.TaskID, &p.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, p)

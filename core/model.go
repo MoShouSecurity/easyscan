@@ -66,18 +66,28 @@ type IP struct {
 
 // Port 开放端口与服务识别结果。
 type Port struct {
-	ID        string `json:"id"`
-	IP        string `json:"ip"`
-	Port      int    `json:"port"`
-	Protocol  string `json:"protocol"` // tcp / udp
-	Service   string `json:"service"`
-	Product   string `json:"product"` // 产品名，如 nginx / MySQL
-	Version   string `json:"version"` // 版本号，如 1.18.0 / 5.7.32
-	Banner    string `json:"banner"`
-	Title     string `json:"title"`
-	TaskID    string `json:"task_id"`
-	CreatedAt int64  `json:"created_at"`
+	ID         string `json:"id"`
+	IP         string `json:"ip"`
+	Port       int    `json:"port"`
+	Protocol   string `json:"protocol"` // tcp / udp
+	Service    string `json:"service"`
+	Product    string `json:"product"`    // 产品名，如 nginx / MySQL
+	Version    string `json:"version"`    // 版本号，如 1.18.0 / 5.7.32
+	Banner     string `json:"banner"`
+	Title      string `json:"title"`
+	Confidence int    `json:"confidence"` // 结果置信度 0-100，0 表示未标注
+	TaskID     string `json:"task_id"`
+	CreatedAt  int64  `json:"created_at"`
 }
+
+// 端口扫描结果置信度等级（0-100）。
+const (
+	ConfidenceSyn        = 95 // nmap SYN 半开扫描
+	ConfidenceNmapV      = 90 // nmap TCP connect + 版本识别
+	ConfidenceNmap       = 85 // nmap TCP connect 无版本
+	ConfidencePureGo     = 70 // 纯 Go TCP connect 降级扫描
+	ConfidenceMasscanHit = 75 // masscan SYN 发现（未走服务识别）
+)
 
 // Site Web 站点指纹识别结果。
 type Site struct {

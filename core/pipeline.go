@@ -127,8 +127,21 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, s
 		e.updateStage(taskID, StageDNS)
 		report("DNS 解析", "解析 A 记录 ...", 22)
 		resolved := resolveBatch(ctx, all, e.opts.Concurrency, e.opts.Timeout)
+		// 枚举阶段入库的历史 IP（FOFA 收录等）：子域名已不解析时兜底进扫描，
+		// 解析成功时也一并纳入（失效 IP 由端口扫描前的存活探测拦截）。
+		historical := map[string][]string{}
+		if saved, err := e.store.ListSubdomains(domain, 0); err == nil {
+			for _, sd := range saved {
+				if sd.IP != "" {
+					historical[sd.Subdomain] = appendUnique(historical[sd.Subdomain], sd.IP)
+				}
+			}
+		}
 		for _, host := range all {
 			ips := resolved[host]
+			for _, hip := range historical[host] {
+				ips = appendUnique(ips, hip)
+			}
 			if len(ips) == 0 {
 				continue
 			}

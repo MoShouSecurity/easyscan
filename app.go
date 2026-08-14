@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"easyscan/core"
 
@@ -129,9 +130,12 @@ func (a *App) StartScan(req ScanRequest) (string, error) {
 	if req.PortMode != "" {
 		opts.PortMode = req.PortMode
 	}
-	opts.PortSpec = req.PortSpec
+	// 仅非空时覆盖：保留配置里的 DefaultPortSpec 默认值。
+	if req.PortSpec != "" {
+		opts.PortSpec = req.PortSpec
+	}
 	if opts.PortMode == "custom" {
-		if _, err := core.ParsePortSpec(req.PortSpec); err != nil {
+		if _, err := core.ParsePortSpec(opts.PortSpec); err != nil {
 			return "", fmt.Errorf("自定义端口无效: %w", err)
 		}
 	}
@@ -154,6 +158,18 @@ func (a *App) StartScan(req ScanRequest) (string, error) {
 		// 未指定或为空时自动判断。
 		if core.IsIPTarget(req.Target) {
 			typ = core.TaskIP
+		}
+	}
+
+	// 域名目标强制白名单校验：会进入提权子进程（sudo/osascript 等），
+	// 未经校验的用户输入存在命令注入风险（S-01），入口层拦截。
+	if typ == core.TaskDomain {
+		clean := strings.TrimSpace(strings.ToLower(req.Target))
+		clean = strings.TrimPrefix(clean, "http://")
+		clean = strings.TrimPrefix(clean, "https://")
+		clean = strings.TrimSuffix(clean, "/")
+		if err := core.ValidateDomain(clean); err != nil {
+			return "", fmt.Errorf("目标域名非法: %w", err)
 		}
 	}
 

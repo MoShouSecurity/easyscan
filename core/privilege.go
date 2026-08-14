@@ -33,11 +33,12 @@ func enumerateWithKsubdomainPrivileged(domain string) ([]string, error) {
 	case "darwin":
 		// osascript 弹管理员授权框，输入密码后以 root 执行，同时刷新 sudo timestamp。
 		// with prompt 自定义授权框提示，说明提权是为了跑子域名爆破。
-		// 转义反斜杠与引号：exe 路径可能含空格（app bundle 位于 /Applications 下），
-		// domain 为用户输入，防 shell 断开与命令注入。
-		exeQuoted := strings.ReplaceAll(strings.ReplaceAll(exe, `\`, `\\`), `"`, `\"`)
-		domainQuoted := strings.ReplaceAll(strings.ReplaceAll(domain, `\`, `\\`), `"`, `\"`)
-		script := fmt.Sprintf(`do shell script "%s --ksubdomain-enum %s" with prompt "Easy Scan 需要使用 ksubdomain 进行子域名无状态爆破，需要管理员权限" with administrator privileges`, exeQuoted, domainQuoted)
+		// shell 单引号包裹（最严格转义层）：exe 路径可能含空格，domain 已在上层
+		// 白名单校验（S-01），此处单引号转义为纵深防御。
+		shellQuote := func(s string) string {
+			return `'` + strings.ReplaceAll(s, `'`, `'\''`) + `'`
+		}
+		script := fmt.Sprintf(`do shell script "%s --ksubdomain-enum %s" with prompt "Easy Scan 需要使用 ksubdomain 进行子域名无状态爆破，需要管理员权限" with administrator privileges`, shellQuote(exe), shellQuote(domain))
 		out, err = exec.Command("osascript", "-e", script).Output()
 	case "linux":
 		// pkexec 弹 PolicyKit 授权框。

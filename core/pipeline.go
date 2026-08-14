@@ -78,8 +78,8 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, s
 	domain = strings.TrimPrefix(domain, "http://")
 	domain = strings.TrimPrefix(domain, "https://")
 	domain = strings.TrimSuffix(domain, "/")
-	if domain == "" {
-		return fmt.Errorf("目标域名不能为空")
+	if err := ValidateDomain(domain); err != nil {
+		return fmt.Errorf("目标域名非法: %w", err) // 拒绝进入提权子进程等危险上下文
 	}
 
 	report := func(stage, detail string, pct int) {

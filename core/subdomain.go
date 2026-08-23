@@ -4,28 +4,30 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
 )
 
 // persistEnumerated 把枚举到的子域名入库（IP 可为空，DNS 阶段再补）。
-// store 为 nil 时跳过（CLI 场景）；单条失败忽略，不阻断枚举流程。
-func persistEnumerated(store *Store, domain, taskID, source string, hosts []string) {
+// store 为 nil 时跳过（CLI 场景）；写入失败返回上层，避免任务完成但资产缺失。
+func persistEnumerated(store *Store, domain, taskID, source string, hosts []string) error {
 	if store == nil {
-		return
+		return nil
 	}
 	for _, host := range hosts {
-		_ = store.UpsertSubdomain(Subdomain{
+		if err := store.UpsertSubdomain(Subdomain{
 			ID:        newID(),
 			Domain:    domain,
 			Subdomain: host,
 			Source:    source,
 			TaskID:    taskID,
 			CreatedAt: nowUnix(),
-		})
+		}); err != nil {
+			return fmt.Errorf("保存 %s 子域名 %s: %w", source, host, err)
+		}
 	}
+	return nil
 }
 
 // enumerateSubdomains 合并 FOFA / subfinder 被动收集与 ksubdomain 主动爆破，
@@ -34,7 +36,7 @@ func persistEnumerated(store *Store, domain, taskID, source string, hosts []stri
 // FOFA 独立于爆破开关（被动查库）；subfinder/ksubdomain/纯 Go 跟随 SubdomainBrute。
 // FOFA 站点探测与爆破并行执行（互不阻塞），探测结果与端口扫描发现的网页
 // 统一走站点去重（URL 唯一）+ 截图链。
-func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions, store *Store, taskID string, report ProgressFunc) []string {
+func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions, store *Store, taskID string, report ProgressFunc) ([]string, error) {
 	seen := map[string]bool{}
 	var fofaResults []fofaResult
 
@@ -50,7 +52,7 @@ func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions, s
 			for _, r := range results {
 				seen[r.Host] = true
 				if store != nil {
-					_ = store.UpsertSubdomain(Subdomain{
+					if err := store.UpsertSubdomain(Subdomain{
 						ID:        newID(),
 						Domain:    domain,
 						Subdomain: r.Host,
@@ -58,7 +60,9 @@ func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions, s
 						Source:    "fofa",
 						TaskID:    taskID,
 						CreatedAt: nowUnix(),
-					})
+					}); err != nil {
+						return nil, fmt.Errorf("保存 FOFA 子域名 %s: %w", r.Host, err)
+					}
 				}
 			}
 			if report != nil && len(results) > 0 {
@@ -69,13 +73,20 @@ func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions, s
 
 	// 2. FOFA 站点探测与爆破并行（probe 不写 seen，无并发问题）。
 	// probe 只探测 FOFA 端口线索并入库站点，与爆破互不阻塞。
-	var probeDone chan struct{}
+	var probeDone chan error
 	if len(fofaResults) > 0 && store != nil {
-		probeDone = make(chan struct{})
+		probeDone = make(chan error, 1)
 		go func() {
-			defer close(probeDone)
-			probeFofaSites(ctx, fofaResults, store, taskID, opts.Timeout)
+			probeDone <- probeFofaSites(ctx, fofaResults, store, taskID, opts.Timeout)
 		}()
+	}
+	waitProbe := func() error {
+		if probeDone == nil {
+			return nil
+		}
+		err := <-probeDone
+		probeDone = nil
+		return err
 	}
 
 	if opts.SubdomainBrute {
@@ -84,7 +95,10 @@ func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions, s
 			report("子域名枚举", "subfinder 被动收集 ...", 5)
 		}
 		if subs, err := enumerateWithSubfinder(ctx, domain, opts.ProviderConfigPath, opts.ProxyURL); err == nil {
-			persistEnumerated(store, domain, taskID, "subfinder", subs)
+			if err := persistEnumerated(store, domain, taskID, "subfinder", subs); err != nil {
+				_ = waitProbe()
+				return nil, err
+			}
 			for _, s := range subs {
 				seen[s] = true
 			}
@@ -97,7 +111,10 @@ func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions, s
 			report("子域名枚举", "ksubdomain 无状态爆破 ...", 8)
 		}
 		if subs, err := enumerateWithKsubdomainPrivileged(domain); err == nil && len(subs) > 0 {
-			persistEnumerated(store, domain, taskID, "ksubdomain", subs)
+			if err := persistEnumerated(store, domain, taskID, "ksubdomain", subs); err != nil {
+				_ = waitProbe()
+				return nil, err
+			}
 			for _, s := range subs {
 				seen[s] = true
 			}
@@ -105,7 +122,10 @@ func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions, s
 		}
 		if !enumerated {
 			if subs, err := enumerateWithKsubdomainIsolated(ctx, domain); err == nil && len(subs) > 0 {
-				persistEnumerated(store, domain, taskID, "ksubdomain", subs)
+				if err := persistEnumerated(store, domain, taskID, "ksubdomain", subs); err != nil {
+					_ = waitProbe()
+					return nil, err
+				}
 				for _, s := range subs {
 					seen[s] = true
 				}
@@ -125,7 +145,10 @@ func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions, s
 				}
 			}
 			brute := bruteSubdomains(ctx, domain, dict, 500, 2*time.Second)
-			persistEnumerated(store, domain, taskID, "brute", brute)
+			if err := persistEnumerated(store, domain, taskID, "brute", brute); err != nil {
+				_ = waitProbe()
+				return nil, err
+			}
 			for _, s := range brute {
 				seen[s] = true
 			}
@@ -133,22 +156,26 @@ func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions, s
 	}
 
 	if probeDone != nil {
-		<-probeDone // 等站点探测收尾（通常先于爆破结束）
+		if err := waitProbe(); err != nil {
+			return nil, err
+		}
 	}
 
 	out := make([]string, 0, len(seen))
 	for s := range seen {
 		out = append(out, s)
 	}
-	return out
+	return out, nil
 }
 
 // probeFofaSites 并发探测 FOFA 带端口线索的站点（http/https，Host 头=子域名），
 // 命中即入库（URL 唯一去重，与端口扫描发现的站点同表同去重）。
 // 限并发 20，避免大量结果时打满网络；与爆破并行调用，互不阻塞。
-func probeFofaSites(ctx context.Context, results []fofaResult, store *Store, taskID string, timeout time.Duration) {
+func probeFofaSites(ctx context.Context, results []fofaResult, store *Store, taskID string, timeout time.Duration) error {
 	sem := make(chan struct{}, 20)
 	var wg sync.WaitGroup
+	var firstErr error
+	var errOnce sync.Once
 	for _, r := range results {
 		if r.Port <= 0 {
 			continue
@@ -164,13 +191,16 @@ func probeFofaSites(ctx context.Context, results []fofaResult, store *Store, tas
 				}
 				if site, ok := probeSite(ctx, r.IP, r.Port, scheme, r.Host, timeout); ok {
 					site.TaskID = taskID
-					_ = store.UpsertSite(site)
+					if err := store.UpsertSite(site); err != nil {
+						errOnce.Do(func() { firstErr = fmt.Errorf("保存 FOFA 站点 %s: %w", site.URL, err) })
+					}
 					return
 				}
 			}
 		}(r)
 	}
 	wg.Wait()
+	return firstErr
 }
 
 // bruteSubdomains 字典爆破：对每个候选前缀做 DNS 解析，能解析到的即为存活子域名。
@@ -193,11 +223,6 @@ func bruteSubdomains(ctx context.Context, domain string, dict []string, limit in
 		out = append(out, host)
 	}
 	return out
-}
-
-// defaultHTTPClient 构造带超时的 HTTP 客户端。
-func defaultHTTPClient(timeout time.Duration) *http.Client {
-	return &http.Client{Timeout: timeout}
 }
 
 // readBodyLimited 限制读取大小，避免超大响应耗尽内存。

@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"crypto/tls"
 	"html"
 	"net"
 	"net/http"
@@ -57,28 +56,12 @@ func probeSite(ctx context.Context, ip string, port int, scheme string, hostname
 	}
 	// IPv6 地址需 [::1]:80 形式，net.JoinHostPort 统一处理（防非法 URL 静默失败）。
 	url := scheme + "://" + net.JoinHostPort(host, strconv.Itoa(port)) + "/"
-
-	transport := &http.Transport{
-		// 侦察场景不校验证书链，避免自签名/过期证书阻断指纹识别（如 80 重定向到 https）。
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	scope, err := newSiteScope(Site{IP: ip, URL: url})
+	if err != nil {
+		return Site{}, false
 	}
-	if hostname != "" {
-		// 连 IP，但以域名作为 Host 头与 TLS SNI，正确探测虚拟主机。
-		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			_, portStr, _ := net.SplitHostPort(addr)
-			d := net.Dialer{Timeout: timeout}
-			return d.DialContext(ctx, network, net.JoinHostPort(ip, portStr))
-		}
-		transport.TLSClientConfig.ServerName = hostname
-	}
-	client := &http.Client{Transport: transport, Timeout: timeout}
-	// 跟随重定向（最多 5 跳）以拿到最终页面的标题与指纹，如 http→https。
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 5 {
-			return http.ErrUseLastResponse
-		}
-		return nil
-	}
+	// 请求固定到已发现 IP；只允许同主机重定向，避免目标把扫描器带到本机或内网。
+	client := scope.client(timeout, 5)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -92,9 +75,9 @@ func probeSite(ctx context.Context, ip string, port int, scheme string, hostname
 	}
 	defer resp.Body.Close()
 
-	// 记录重定向后的最终 URL。
+	// 只记录最终站点的 origin，后续规则路径不能拼到 /login 等重定向路径之后。
 	if resp.Request != nil && resp.Request.URL != nil {
-		url = resp.Request.URL.String()
+		url = httpOrigin(resp.Request.URL)
 	}
 
 	body, _ := readBodyLimited(resp.Body, 1<<20) // 读取失败视为无内容，指纹匹配自然落空

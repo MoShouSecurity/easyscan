@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"os"
@@ -106,12 +107,13 @@ func inferLeakType(path string) string {
 
 // detectLeaks 对一个站点探测敏感文件/信息泄漏，返回命中的泄漏记录。
 func detectLeaks(ctx context.Context, site Site, taskID string, timeout time.Duration, rules []leakRule) []Leak {
-	client := defaultHTTPClient(timeout)
-	// 泄漏探测不跟随重定向，避免命中自定义 404 跳转页造成误报。
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
+	scope, err := newSiteScope(site)
+	if err != nil {
+		return nil
 	}
-	base := strings.TrimSuffix(site.URL, "/")
+	client := scope.client(timeout, 0)
+	base := strings.TrimSuffix(scope.baseURL, "/")
+	baseline := fetchSoft404Baseline(ctx, client, base)
 
 	var out []Leak
 	for _, r := range rules {
@@ -137,10 +139,11 @@ func detectLeaks(ctx context.Context, site Site, taskID string, timeout time.Dur
 		if r.Sig != "" && !strings.Contains(lower, strings.ToLower(r.Sig)) {
 			continue
 		}
-		// 空签名规则（.DS_Store/.env 等仅判断 200）在 SPA/软 404 站点任意路径
-		// 都返回 200，会产生成片误报；要求响应体有实际内容（≥64 字节）抑制。
-		if r.Sig == "" && len(body) < 64 {
-			continue
+		if r.Sig == "" {
+			// 空签名规则必须区别于随机不存在路径；SPA/catch-all 的统一 200 页面不算泄漏。
+			if len(body) < 64 || baseline.matches(resp, body) {
+				continue
+			}
 		}
 		out = append(out, Leak{
 			ID:         newID(),
@@ -153,4 +156,58 @@ func detectLeaks(ctx context.Context, site Site, taskID string, timeout time.Dur
 		})
 	}
 	return out
+}
+
+type soft404Baseline struct {
+	status      int
+	contentType string
+	body        []byte
+}
+
+func fetchSoft404Baseline(ctx context.Context, client *http.Client, base string) soft404Baseline {
+	url := base + "/.easyscan-not-found-" + newID()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return soft404Baseline{}
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (EasyScan)")
+	resp, err := client.Do(req)
+	if err != nil {
+		return soft404Baseline{}
+	}
+	defer resp.Body.Close()
+	body, _ := readBodyLimited(resp.Body, 256<<10)
+	return soft404Baseline{
+		status:      resp.StatusCode,
+		contentType: normalizedContentType(resp.Header.Get("Content-Type")),
+		body:        body,
+	}
+}
+
+func (b soft404Baseline) matches(resp *http.Response, body []byte) bool {
+	if b.status == 0 || b.status != resp.StatusCode {
+		return false
+	}
+	if bytes.Equal(bytes.TrimSpace(b.body), bytes.TrimSpace(body)) {
+		return true
+	}
+	if b.contentType == "" || b.contentType != normalizedContentType(resp.Header.Get("Content-Type")) {
+		return false
+	}
+	delta := len(b.body) - len(body)
+	if delta < 0 {
+		delta = -delta
+	}
+	tolerance := len(b.body) / 20 // 允许软 404 中时间戳、nonce 等造成约 5% 波动。
+	if tolerance < 64 {
+		tolerance = 64
+	}
+	return delta <= tolerance
+}
+
+func normalizedContentType(value string) string {
+	if i := strings.IndexByte(value, ';'); i >= 0 {
+		value = value[:i]
+	}
+	return strings.ToLower(strings.TrimSpace(value))
 }

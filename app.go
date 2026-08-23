@@ -400,6 +400,9 @@ func (a *App) SaveConfig(cfg core.Config) error {
 	a.configMu.Lock()
 	a.config = cfg
 	a.configMu.Unlock()
+	if a.sched != nil {
+		a.sched.UpdateOptions(cfg.ToOptions())
+	}
 	return nil
 }
 
@@ -422,6 +425,9 @@ func (a *App) DownloadNucleiTemplates() (string, error) {
 	a.configMu.Lock()
 	a.config = cfg
 	a.configMu.Unlock()
+	if a.sched != nil {
+		a.sched.UpdateOptions(cfg.ToOptions())
+	}
 	return dest, nil
 }
 
@@ -438,6 +444,9 @@ func (a *App) OpenSubfinderProviderConfig() (string, error) {
 		a.configMu.Lock()
 		a.config = cfg
 		a.configMu.Unlock()
+		if a.sched != nil {
+			a.sched.UpdateOptions(cfg.ToOptions())
+		}
 	}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		if err := core.GenerateSubfinderProviderConfig(path); err != nil {

@@ -4,13 +4,18 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/security"
 	"github.com/chromedp/chromedp"
@@ -18,11 +23,12 @@ import (
 
 // Screenshotter 基于 chromedp 无头浏览器对站点首页截图，复用单一浏览器实例。
 type Screenshotter struct {
-	ctx         context.Context
-	allocCancel context.CancelFunc
-	ctxCancel   context.CancelFunc
-	dir         string
-	mu          sync.Mutex
+	ctx          context.Context
+	allocCancel  context.CancelFunc
+	ctxCancel    context.CancelFunc
+	dir          string
+	mu           sync.Mutex
+	allowedHosts map[string]string // hostname -> 扫描阶段确认的固定 IP
 }
 
 // NewScreenshotter 构造截图器。chromePath 为空时由 chromedp 自动探测 Chrome。
@@ -32,6 +38,58 @@ func NewScreenshotter(chromePath, dir string) (*Screenshotter, error) {
 
 // NewScreenshotterContext 构造可随父任务取消的截图器。
 func NewScreenshotterContext(parent context.Context, chromePath, dir string) (*Screenshotter, error) {
+	return newScreenshotterContext(parent, chromePath, dir, nil)
+}
+
+// NewScopedScreenshotterContext 构造绑定到当前任务已发现站点集合的截图器。
+// Chrome 的 DNS 解析被固定到各 Site.IP，集合外的子资源和重定向都会被拦截。
+func NewScopedScreenshotterContext(parent context.Context, chromePath, dir string, sites []Site) (*Screenshotter, error) {
+	allowedHosts := make(map[string]string, len(sites))
+	for _, site := range sites {
+		scope, err := newSiteScope(site)
+		if err != nil {
+			return nil, err
+		}
+		if existing, exists := allowedHosts[scope.hostname]; exists && existing != scope.ip {
+			return nil, fmt.Errorf("主机 %s 同时关联多个 IP，需分组截图", scope.hostname)
+		}
+		allowedHosts[scope.hostname] = scope.ip
+	}
+	if len(allowedHosts) == 0 {
+		return nil, fmt.Errorf("没有可截图的有效站点")
+	}
+	return newScreenshotterContext(parent, chromePath, dir, allowedHosts)
+}
+
+// groupScreenshotSites 把同一 hostname 的不同 IP 拆到不同浏览器组，
+// 避免 host-resolver-rules 把其中一个站点错误映射到另一个 IP。
+func groupScreenshotSites(sites []Site) ([][]Site, error) {
+	var groups [][]Site
+	groupHosts := make([]map[string]string, 0)
+	for _, site := range sites {
+		scope, err := newSiteScope(site)
+		if err != nil {
+			return nil, err
+		}
+		placed := false
+		for i, hosts := range groupHosts {
+			if ip, exists := hosts[scope.hostname]; exists && ip != scope.ip {
+				continue
+			}
+			groups[i] = append(groups[i], site)
+			hosts[scope.hostname] = scope.ip
+			placed = true
+			break
+		}
+		if !placed {
+			groups = append(groups, []Site{site})
+			groupHosts = append(groupHosts, map[string]string{scope.hostname: scope.ip})
+		}
+	}
+	return groups, nil
+}
+
+func newScreenshotterContext(parent context.Context, chromePath, dir string, allowedHosts map[string]string) (*Screenshotter, error) {
 	if parent == nil {
 		parent = context.Background()
 	}
@@ -47,6 +105,27 @@ func NewScreenshotterContext(parent context.Context, chromePath, dir string) (*S
 		// 参考 Goby 的 chromedp 配置，避免 headless Chrome 共享内存不足导致截图失败。
 		chromedp.Flag("disable-dev-shm-usage", true),
 	}
+	if len(allowedHosts) > 0 {
+		hosts := make([]string, 0, len(allowedHosts))
+		for host := range allowedHosts {
+			hosts = append(hosts, host)
+		}
+		sort.Strings(hosts)
+		var rules []string
+		for _, host := range hosts {
+			if net.ParseIP(host) != nil {
+				continue
+			}
+			ip := allowedHosts[host]
+			if strings.Contains(ip, ":") {
+				ip = "[" + ip + "]"
+			}
+			rules = append(rules, fmt.Sprintf("MAP %s %s", host, ip))
+		}
+		if len(rules) > 0 {
+			opts = append(opts, chromedp.Flag("host-resolver-rules", strings.Join(rules, ", ")))
+		}
+	}
 	if chromePath != "" {
 		opts = append([]chromedp.ExecAllocatorOption{chromedp.ExecPath(chromePath)}, opts...)
 	}
@@ -59,13 +138,16 @@ func NewScreenshotterContext(parent context.Context, chromePath, dir string) (*S
 		allocCancel()
 		return nil, err
 	}
-	return &Screenshotter{ctx: ctx, allocCancel: allocCancel, ctxCancel: ctxCancel, dir: dir}, nil
+	return &Screenshotter{ctx: ctx, allocCancel: allocCancel, ctxCancel: ctxCancel, dir: dir, allowedHosts: allowedHosts}, nil
 }
 
 // Capture 对 URL 截图并保存，返回文件路径。
 func (s *Screenshotter) Capture(url string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if len(s.allowedHosts) > 0 && !s.allows(url) {
+		return "", fmt.Errorf("拒绝截图扫描范围外地址 %q", url)
+	}
 
 	name := hashURL(url) + ".png"
 	path := filepath.Join(s.dir, name)
@@ -90,39 +172,75 @@ func (s *Screenshotter) Capture(url string) (string, error) {
 		lastActive = time.Now()
 		mu.Unlock()
 	}
-
-	if err := chromedp.Run(cctx,
+	listen := chromedp.ActionFunc(func(ctx context.Context) error {
+		chromedp.ListenTarget(ctx, func(ev interface{}) {
+			switch e := ev.(type) {
+			case *fetch.EventRequestPaused:
+				allowed := len(s.allowedHosts) == 0 || s.allows(e.Request.URL) || isBrowserLocalURL(e.Request.URL)
+				go func() {
+					if allowed {
+						_ = fetch.ContinueRequest(e.RequestID).Do(ctx)
+						return
+					}
+					_ = fetch.FailRequest(e.RequestID, network.ErrorReasonBlockedByClient).Do(ctx)
+				}()
+			case *network.EventRequestWillBeSent,
+				*network.EventResponseReceived,
+				*network.EventLoadingFinished,
+				*network.EventLoadingFailed:
+				markActive()
+			}
+		})
+		return nil
+	})
+	actions := []chromedp.Action{
 		// 忽略 SSL 证书错误（自签名/过期证书的站点也能截图）。
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			return security.SetIgnoreCertificateErrors(true).Do(ctx)
 		}),
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			chromedp.ListenTarget(ctx, func(ev interface{}) {
-				switch ev.(type) {
-				case *network.EventRequestWillBeSent,
-					*network.EventResponseReceived,
-					*network.EventLoadingFinished,
-					*network.EventLoadingFailed:
-					markActive()
-				}
-			})
-			return nil
-		}),
+		listen,
+	}
+	if len(s.allowedHosts) > 0 {
+		actions = append(actions, fetch.Enable().WithPatterns([]*fetch.RequestPattern{{URLPattern: "*", RequestStage: fetch.RequestStageRequest}}))
+	}
+	actions = append(actions,
 		chromedp.Navigate(url),
-		// 等 JS 加载完再截图：网络静默 800ms 视为加载结束（SPA 异步请求全部完成），
-		// 最多等 12s，超时不阻塞；再留 600ms 渲染余量。
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			return waitNetworkIdle(ctx, &mu, &lastActive, 12*time.Second, 800*time.Millisecond)
 		}),
 		chromedp.Sleep(600*time.Millisecond),
 		chromedp.CaptureScreenshot(&buf),
-	); err != nil {
+	)
+
+	if err := chromedp.Run(cctx, actions...); err != nil {
 		return "", err
 	}
 	if err := os.WriteFile(path, buf, 0o644); err != nil {
 		return "", err
 	}
 	return path, nil
+}
+
+func (s *Screenshotter) allows(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.User != nil || !isHTTPScheme(u.Scheme) {
+		return false
+	}
+	_, ok := s.allowedHosts[normalizeHTTPHost(u.Hostname())]
+	return ok
+}
+
+func isBrowserLocalURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "about", "blob", "data":
+		return true
+	default:
+		return false
+	}
 }
 
 // Close 释放浏览器资源。

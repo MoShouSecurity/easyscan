@@ -18,20 +18,34 @@ type Scheduler struct {
 	mu        sync.Mutex
 	enqueueMu sync.Mutex                    // 串行化入队与容量检查，保证状态变更后一定能入队
 	tasks     map[string]context.CancelFunc // taskID -> cancel，支持单任务暂停
+	secrets   map[string]taskSecrets        // 仅内存保存新任务凭据，绝不写入 SQLite
+}
+
+type taskSecrets struct {
+	fofaKey  string
+	proxyURL string
 }
 
 // NewScheduler 构造调度器；调用 Start 指定 worker 数后开始消费任务。
 func NewScheduler(store *Store, opts ScanOptions) *Scheduler {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Scheduler{
-		store:  store,
-		opts:   opts,
-		queue:  make(chan *Task, 256),
-		ctx:    ctx,
-		cancel: cancel,
-		wg:     sync.WaitGroup{},
-		tasks:  make(map[string]context.CancelFunc),
+		store:   store,
+		opts:    opts,
+		queue:   make(chan *Task, 256),
+		ctx:     ctx,
+		cancel:  cancel,
+		wg:      sync.WaitGroup{},
+		tasks:   make(map[string]context.CancelFunc),
+		secrets: make(map[string]taskSecrets),
 	}
+}
+
+// UpdateOptions 更新恢复任务使用的当前运行时配置（尤其是不会持久化的凭据）。
+func (s *Scheduler) UpdateOptions(opts ScanOptions) {
+	s.mu.Lock()
+	s.opts = opts
+	s.mu.Unlock()
 }
 
 // Start 启动 worker 池。
@@ -53,7 +67,10 @@ func (s *Scheduler) Stop() {
 
 // Submit 创建并提交一个任务，返回任务记录（状态为 pending）。
 func (s *Scheduler) Submit(target string, typ TaskType, opts ScanOptions) (*Task, error) {
-	params, err := json.Marshal(opts)
+	persisted := opts
+	persisted.FofaKey = ""
+	persisted.ProxyURL = ""
+	params, err := json.Marshal(persisted)
 	if err != nil {
 		return nil, fmt.Errorf("序列化扫描参数: %w", err)
 	}
@@ -68,10 +85,14 @@ func (s *Scheduler) Submit(target string, typ TaskType, opts ScanOptions) (*Task
 	if err := s.store.CreateTask(t); err != nil {
 		return nil, err
 	}
+	s.mu.Lock()
+	s.secrets[t.ID] = taskSecrets{fofaKey: opts.FofaKey, proxyURL: opts.ProxyURL}
+	s.mu.Unlock()
 
 	s.enqueueMu.Lock()
 	defer s.enqueueMu.Unlock()
 	if s.ctx.Err() != nil {
+		s.forgetSecrets(t.ID)
 		t.Status = TaskFailed
 		t.Message = "调度器已停止"
 		t.FinishedAt = nowUnix()
@@ -80,6 +101,7 @@ func (s *Scheduler) Submit(target string, typ TaskType, opts ScanOptions) (*Task
 	}
 	// 所有发送方都持有 enqueueMu；worker 只会腾出容量，因此检查后发送不会阻塞。
 	if len(s.queue) >= cap(s.queue) {
+		s.forgetSecrets(t.ID)
 		t.Status = TaskFailed
 		t.Message = "任务队列已满，请稍后重试"
 		t.FinishedAt = nowUnix()
@@ -152,6 +174,15 @@ func (s *Scheduler) worker() {
 }
 
 func (s *Scheduler) run(t *Task) {
+	s.mu.Lock()
+	secrets, hasTaskSecrets := s.secrets[t.ID]
+	delete(s.secrets, t.ID)
+	defaultOpts := s.opts
+	s.mu.Unlock()
+	if !hasTaskSecrets {
+		secrets = taskSecrets{fofaKey: defaultOpts.FofaKey, proxyURL: defaultOpts.ProxyURL}
+	}
+
 	var opts ScanOptions
 	if err := json.Unmarshal([]byte(t.Params), &opts); err != nil {
 		t.Status = TaskFailed
@@ -161,8 +192,11 @@ func (s *Scheduler) run(t *Task) {
 		return
 	}
 	if opts.Concurrency == 0 {
-		opts = s.opts
+		opts = defaultOpts
 	}
+	// 即便旧任务 params 中含凭据，也始终覆盖为内存中的当前值，防止旧 key 复活。
+	opts.FofaKey = secrets.fofaKey
+	opts.ProxyURL = secrets.proxyURL
 
 	// 每个任务独立 context，支持单独取消（暂停）。
 	ctx, cancel := context.WithCancel(s.ctx)
@@ -222,4 +256,10 @@ func (s *Scheduler) run(t *Task) {
 		return
 	}
 	updateRunning(TaskFinished, 100, "完成")
+}
+
+func (s *Scheduler) forgetSecrets(taskID string) {
+	s.mu.Lock()
+	delete(s.secrets, taskID)
+	s.mu.Unlock()
 }

@@ -54,11 +54,14 @@ func stageIndex(stage string) int {
 }
 
 // updateStage 记录任务当前阶段（持久化，用于断点续扫）。
-func (e *Engine) updateStage(taskID, stage string) {
+func (e *Engine) updateStage(taskID, stage string) error {
 	if taskID == "" {
-		return
+		return nil
 	}
-	_ = e.store.UpdateTaskStage(taskID, stage)
+	if err := e.store.UpdateTaskStage(taskID, stage); err != nil {
+		return fmt.Errorf("记录扫描阶段 %s: %w", stage, err)
+	}
+	return nil
 }
 
 // ScanTarget 按目标类型分发到域名或 IP 侦察流程。
@@ -99,16 +102,25 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, s
 	// 2. 子域名枚举（断点续扫时跳过，从数据库恢复）。
 	// FOFA 独立于爆破开关：关爆破但配置了 FOFA key 时仍执行被动收集。
 	if stageIndex(startStage) <= stageIndex(StageSubdomain) {
-		e.updateStage(taskID, StageSubdomain)
+		if err := e.updateStage(taskID, StageSubdomain); err != nil {
+			return err
+		}
 		if e.opts.SubdomainBrute || e.opts.FofaKey != "" {
 			report("子域名枚举", "无状态爆破 ...", 5)
-			for _, s := range enumerateSubdomains(ctx, domain, e.opts, e.store, taskID, report) {
+			discovered, err := enumerateSubdomains(ctx, domain, e.opts, e.store, taskID, report)
+			if err != nil {
+				return err
+			}
+			for _, s := range discovered {
 				subs[s] = true
 			}
 		}
 		report("子域名枚举", fmt.Sprintf("共发现 %d 个子域名", len(subs)), 20)
 	} else {
-		saved := e.taskSubdomains(taskID, domain)
+		saved, err := e.taskSubdomains(taskID, domain)
+		if err != nil {
+			return err
+		}
 		for _, sd := range saved {
 			subs[sd.Subdomain] = true
 		}
@@ -124,17 +136,21 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, s
 	// 3. DNS 解析（断点续扫时跳过，从数据库恢复 IP）。
 	ipHosts := map[string][]string{} // ip -> 关联域名
 	if stageIndex(startStage) <= stageIndex(StageDNS) {
-		e.updateStage(taskID, StageDNS)
+		if err := e.updateStage(taskID, StageDNS); err != nil {
+			return err
+		}
 		report("DNS 解析", "解析 A 记录 ...", 22)
 		resolved := resolveBatch(ctx, all, e.opts.Concurrency, e.opts.Timeout)
 		// 枚举阶段入库的历史 IP（FOFA 收录等）：子域名已不解析时兜底进扫描，
 		// 解析成功时也一并纳入（失效 IP 由端口扫描前的存活探测拦截）。
 		historical := map[string][]string{}
-		if saved, err := e.store.ListSubdomains(domain, -1); err == nil {
-			for _, sd := range saved {
-				if sd.IP != "" {
-					historical[sd.Subdomain] = appendUnique(historical[sd.Subdomain], sd.IP)
-				}
+		saved, err := e.store.ListSubdomains(domain, -1)
+		if err != nil {
+			return fmt.Errorf("读取历史子域名: %w", err)
+		}
+		for _, sd := range saved {
+			if sd.IP != "" {
+				historical[sd.Subdomain] = appendUnique(historical[sd.Subdomain], sd.IP)
 			}
 		}
 		for _, host := range all {
@@ -154,14 +170,19 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, s
 				TaskID:    taskID,
 				CreatedAt: nowUnix(),
 			}
-			_ = e.store.UpsertSubdomain(sd)
+			if err := e.store.UpsertSubdomain(sd); err != nil {
+				return fmt.Errorf("保存子域名 %s: %w", host, err)
+			}
 			for _, ip := range ips {
 				ipHosts[ip] = appendUnique(ipHosts[ip], host)
 			}
 		}
 		report("DNS 解析", fmt.Sprintf("解析到 %d 个存活子域名 / %d 个独立 IP", len(resolved), len(keysOfSlice(ipHosts))), 30)
 	} else {
-		saved := e.taskSubdomains(taskID, domain)
+		saved, err := e.taskSubdomains(taskID, domain)
+		if err != nil {
+			return err
+		}
 		for _, sd := range saved {
 			if sd.IP != "" {
 				ipHosts[sd.IP] = appendUnique(ipHosts[sd.IP], sd.Subdomain)
@@ -178,11 +199,20 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, s
 
 	// 4. 端口扫描 + 服务识别 + 指纹。（断点续扫时跳过，从数据库恢复站点）
 	var sites []Site
+	var err error
 	if stageIndex(startStage) <= stageIndex(StagePortScan) {
-		e.updateStage(taskID, StagePortScan)
-		sites = e.scanPortsAndSites(ctx, ips, nil, ipHosts, taskID, report, 30, 60)
+		if err := e.updateStage(taskID, StagePortScan); err != nil {
+			return err
+		}
+		sites, err = e.scanPortsAndSites(ctx, ips, nil, ipHosts, taskID, report, 30, 60)
+		if err != nil {
+			return err
+		}
 	} else {
-		sites, _ = e.store.ListSitesByTask(taskID, -1)
+		sites, err = e.store.ListSitesByTask(taskID, -1)
+		if err != nil {
+			return fmt.Errorf("恢复任务站点: %w", err)
+		}
 	}
 
 	if ctx.Err() != nil {
@@ -191,8 +221,12 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, s
 
 	// 5. 附加模块：文件泄漏 / POC / 截图。
 	if stageIndex(startStage) <= stageIndex(StagePostProcess) {
-		e.updateStage(taskID, StagePostProcess)
-		e.postProcess(ctx, sites, taskID, report, 90)
+		if err := e.updateStage(taskID, StagePostProcess); err != nil {
+			return err
+		}
+		if err := e.postProcess(ctx, sites, taskID, report, 90); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -200,14 +234,21 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, s
 
 // taskSubdomains 优先恢复当前任务的数据；旧数据库中任务关联可能为空，
 // 此时回退到该根域名的最新全局记录，保证升级后的旧任务仍可恢复。
-func (e *Engine) taskSubdomains(taskID, domain string) []Subdomain {
+func (e *Engine) taskSubdomains(taskID, domain string) ([]Subdomain, error) {
 	if taskID != "" {
-		if saved, err := e.store.ListSubdomainsByTask(taskID, -1); err == nil && len(saved) > 0 {
-			return saved
+		saved, err := e.store.ListSubdomainsByTask(taskID, -1)
+		if err != nil {
+			return nil, fmt.Errorf("恢复任务子域名: %w", err)
+		}
+		if len(saved) > 0 {
+			return saved, nil
 		}
 	}
-	saved, _ := e.store.ListSubdomains(domain, -1)
-	return saved
+	saved, err := e.store.ListSubdomains(domain, -1)
+	if err != nil {
+		return nil, fmt.Errorf("恢复域名资产: %w", err)
+	}
+	return saved, nil
 }
 
 // ScanIPs 对 IP 或 CIDR 网段执行端口扫描流程。startStage 用于断点续扫。
@@ -226,11 +267,19 @@ func (e *Engine) ScanIPs(ctx context.Context, target string, taskID string, star
 
 	var sites []Site
 	if stageIndex(startStage) <= stageIndex(StagePortScan) {
-		e.updateStage(taskID, StagePortScan)
+		if err := e.updateStage(taskID, StagePortScan); err != nil {
+			return err
+		}
 		report("端口扫描", fmt.Sprintf("目标 %d 个 IP (模式: %s) ...", len(ips), e.opts.PortMode), 1)
-		sites = e.scanPortsAndSites(ctx, ips, nmapTargets, nil, taskID, report, 0, 90)
+		sites, err = e.scanPortsAndSites(ctx, ips, nmapTargets, nil, taskID, report, 0, 90)
+		if err != nil {
+			return err
+		}
 	} else {
-		sites, _ = e.store.ListSitesByTask(taskID, -1)
+		sites, err = e.store.ListSitesByTask(taskID, -1)
+		if err != nil {
+			return fmt.Errorf("恢复任务站点: %w", err)
+		}
 	}
 
 	if ctx.Err() != nil {
@@ -238,8 +287,12 @@ func (e *Engine) ScanIPs(ctx context.Context, target string, taskID string, star
 	}
 
 	if stageIndex(startStage) <= stageIndex(StagePostProcess) {
-		e.updateStage(taskID, StagePostProcess)
-		e.postProcess(ctx, sites, taskID, report, 90)
+		if err := e.updateStage(taskID, StagePostProcess); err != nil {
+			return err
+		}
+		if err := e.postProcess(ctx, sites, taskID, report, 90); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -248,15 +301,17 @@ func (e *Engine) ScanIPs(ctx context.Context, target string, taskID string, star
 // nmapTargets 为 nmap 使用的原始目标条目（支持 CIDR，避免展开成大量参数）；为空则退回 ips。
 // base/span 为进度区间（如 base=30, span=60 表示进度从 30% 推进到 90%）。
 // 优先用 nmap（-sn 存活确认 + -sV 服务/版本识别），不可用/失败时降级纯 Go 扫描。
-func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTargets []string, ipHosts map[string][]string, taskID string, report ProgressFunc, base int, span int) []Site {
+func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTargets []string, ipHosts map[string][]string, taskID string, report ProgressFunc, base int, span int) ([]Site, error) {
 	siteMap := map[string]Site{}
 	// 合并任务已有站点（如 FOFA 端口线索在枚举阶段直接探测入库的），
 	// 保证它们进入后续泄漏/POC/截图等附加流程。
 	if taskID != "" {
-		if saved, err := e.store.ListSitesByTask(taskID, -1); err == nil {
-			for _, s := range saved {
-				siteMap[s.URL] = s
-			}
+		saved, err := e.store.ListSitesByTask(taskID, -1)
+		if err != nil {
+			return nil, fmt.Errorf("读取已有站点: %w", err)
+		}
+		for _, s := range saved {
+			siteMap[s.URL] = s
 		}
 	}
 	nmap := NewNmapScanner(e.opts.NmapPath)
@@ -320,9 +375,9 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 	}
 
 	// recordAlive 确认存活 IP 入库（即使无开放端口也记录，详情页「IP存活」显示）。
-	recordAlive := func(ip string) {
+	recordAlive := func(ip string) error {
 		if recorded[ip] {
-			return
+			return nil
 		}
 		confirmed[ip] = true
 		if err := e.store.UpsertIP(IP{
@@ -330,12 +385,16 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 			IP:        ip,
 			TaskID:    taskID,
 			CreatedAt: nowUnix(),
-		}); err == nil {
-			recorded[ip] = true
+		}); err != nil {
+			return fmt.Errorf("保存存活 IP %s: %w", ip, err)
 		}
+		recorded[ip] = true
+		return nil
 	}
 	for ip := range confirmed {
-		recordAlive(ip)
+		if err := recordAlive(ip); err != nil {
+			return nil, err
+		}
 	}
 
 	// 2. nmap 端口扫描 + 服务/版本识别。
@@ -350,7 +409,9 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 		if err == nil {
 			for _, h := range hosts {
 				if len(h.Ports) > 0 {
-					recordAlive(h.IP)
+					if err := recordAlive(h.IP); err != nil {
+						return nil, err
+					}
 				}
 				hostname := ""
 				if ipHosts != nil {
@@ -383,9 +444,13 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 						site.TaskID = taskID
 						rec.Title = site.Title
 						siteMap[site.URL] = site
-						_ = e.store.UpsertSite(site)
+						if err := e.store.UpsertSite(site); err != nil {
+							return nil, fmt.Errorf("保存站点 %s: %w", site.URL, err)
+						}
 					}
-					_ = e.store.UpsertPort(rec)
+					if err := e.store.UpsertPort(rec); err != nil {
+						return nil, fmt.Errorf("保存端口 %s:%d: %w", rec.IP, rec.Port, err)
+					}
 				}
 			}
 			mode := "TCP connect"
@@ -396,7 +461,7 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 				}
 			}
 			report("端口扫描", fmt.Sprintf("nmap %s 扫描完成，识别 %d 个 IP", mode, len(hosts)), base+span)
-			return mapToSites(siteMap)
+			return mapToSites(siteMap), nil
 		}
 		report("端口扫描", "nmap 扫描失败，降级纯 Go 扫描: "+err.Error(), base+span/10)
 	}
@@ -412,7 +477,9 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 		}
 		open := scanIPPorts(ctx, ip, ports, e.opts.Concurrency, e.opts.Timeout)
 		if len(open) > 0 {
-			recordAlive(ip)
+			if err := recordAlive(ip); err != nil {
+				return nil, err
+			}
 		}
 		for _, p := range open {
 			service, banner := grabBanner(ctx, ip, p, e.opts.Timeout)
@@ -431,9 +498,13 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 				site.TaskID = taskID
 				rec.Title = site.Title
 				siteMap[site.URL] = site
-				_ = e.store.UpsertSite(site)
+				if err := e.store.UpsertSite(site); err != nil {
+					return nil, fmt.Errorf("保存站点 %s: %w", site.URL, err)
+				}
 			}
-			_ = e.store.UpsertPort(rec)
+			if err := e.store.UpsertPort(rec); err != nil {
+				return nil, fmt.Errorf("保存端口 %s:%d: %w", rec.IP, rec.Port, err)
+			}
 		}
 		pct := base
 		if len(alive) > 0 {
@@ -442,7 +513,7 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 		report("端口扫描", fmt.Sprintf("[%d/%d] %s 开放 %d 端口", i+1, len(alive), ip, len(open)), pct)
 	}
 
-	return mapToSites(siteMap)
+	return mapToSites(siteMap), nil
 }
 
 func mapToSites(siteMap map[string]Site) []Site {
@@ -454,9 +525,14 @@ func mapToSites(siteMap map[string]Site) []Site {
 }
 
 // postProcess 执行文件泄漏 / POC / 截图等附加模块。base 为起始进度（百分比）。
-func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, report ProgressFunc, base int) {
+func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, report ProgressFunc, base int) error {
 	if len(sites) == 0 {
-		return
+		return nil
+	}
+	for _, site := range sites {
+		if _, err := newSiteScope(site); err != nil {
+			return fmt.Errorf("站点扫描范围无效: %w", err)
+		}
 	}
 	pct := base
 
@@ -473,7 +549,9 @@ func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, r
 		}
 		for _, site := range sites {
 			for _, leak := range detectLeaks(ctx, site, taskID, e.opts.Timeout, rules) {
-				_ = e.store.UpsertLeak(leak)
+				if err := e.store.UpsertLeak(leak); err != nil {
+					return fmt.Errorf("保存泄漏结果 %s: %w", leak.URL, err)
+				}
 			}
 		}
 		pct += 3
@@ -483,7 +561,9 @@ func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, r
 		report("POC 检测", fmt.Sprintf("检测 %d 个站点", len(sites)), pct)
 		for _, site := range sites {
 			for _, leak := range runNuclei(ctx, site, taskID, e.opts.Timeout) {
-				_ = e.store.UpsertLeak(leak)
+				if err := e.store.UpsertLeak(leak); err != nil {
+					return fmt.Errorf("保存 POC 结果 %s: %w", leak.URL, err)
+				}
 			}
 		}
 		// 自定义 nuclei 模板目录。
@@ -492,7 +572,9 @@ func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, r
 				report("POC 检测", fmt.Sprintf("加载 %d 个自定义模板", len(templates)), pct)
 				for _, site := range sites {
 					for _, leak := range runNucleiYAML(ctx, site, taskID, templates, e.opts.Timeout) {
-						_ = e.store.UpsertLeak(leak)
+						if err := e.store.UpsertLeak(leak); err != nil {
+							return fmt.Errorf("保存自定义 POC 结果 %s: %w", leak.URL, err)
+						}
 					}
 				}
 			} else if err != nil {
@@ -504,28 +586,37 @@ func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, r
 	}
 	if e.opts.Screenshot {
 		report("站点截图", fmt.Sprintf("截图 %d 个站点", len(sites)), pct)
-		shot, err := NewScreenshotterContext(ctx, e.opts.ChromePath, e.opts.ScreenshotDir)
+		groups, err := groupScreenshotSites(sites)
 		if err != nil {
-			report("站点截图", "截图器初始化失败: "+err.Error(), pct)
-			return
+			return fmt.Errorf("构造截图范围: %w", err)
 		}
-		defer shot.Close()
-		for _, site := range sites {
-			saved := false
-			for _, u := range ScreenshotCandidates(site.URL) {
-				if path, err := shot.Capture(u); err == nil {
-					_ = e.store.SetSiteScreenshot(taskID, site.URL, path)
-					saved = true
-					break
+		for _, group := range groups {
+			shot, err := NewScopedScreenshotterContext(ctx, e.opts.ChromePath, e.opts.ScreenshotDir, group)
+			if err != nil {
+				return fmt.Errorf("截图器初始化失败: %w", err)
+			}
+			for _, site := range group {
+				saved := false
+				for _, u := range ScreenshotCandidates(site.URL) {
+					if path, err := shot.Capture(u); err == nil {
+						if err := e.store.SetSiteScreenshot(taskID, site.URL, path); err != nil {
+							shot.Close()
+							return fmt.Errorf("保存站点截图路径 %s: %w", site.URL, err)
+						}
+						saved = true
+						break
+					}
+				}
+				if !saved {
+					report("站点截图", fmt.Sprintf("截图失败 %s", site.URL), pct)
 				}
 			}
-			if !saved {
-				report("站点截图", fmt.Sprintf("截图失败 %s", site.URL), pct)
-			}
+			shot.Close()
 		}
 		pct += 3
 		report("站点截图", "完成", pct)
 	}
+	return nil
 }
 
 // probeWebSite 判断端口是否为 Web 服务并探测指纹；非 Web 返回 ok=false。

@@ -45,9 +45,9 @@ type ScanOptions struct {
 	// ProviderConfigPath subfinder 的 provider-config.yaml 路径（空则用默认位置）。
 	ProviderConfigPath string `json:"provider_config_path"`
 	// FofaKey FOFA API key（空则跳过 FOFA 子域名收集）。
-	FofaKey string `json:"fofa_key"`
+	FofaKey string `json:"fofa_key,omitempty"`
 	// ProxyURL 出站 HTTP 代理（FOFA / subfinder 被动收集使用），如 http://127.0.0.1:7890。
-	ProxyURL string `json:"proxy_url"`
+	ProxyURL string `json:"proxy_url,omitempty"`
 	// Concurrency 并发度（0 表示使用默认值）。
 	Concurrency int `json:"concurrency"`
 	// Timeout 单次网络探测超时（0 表示默认值），序列化为纳秒以便任务参数往返。

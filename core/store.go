@@ -2,6 +2,7 @@ package core
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -47,9 +48,10 @@ func OpenStore(path string) (*Store, error) {
 	return s, nil
 }
 
-// ensureColumn 若列不存在则添加；已存在则忽略（用于旧库平滑迁移）。
-func (s *Store) ensureColumn(table, column, decl string) error {
-	_, err := s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, decl))
+// ensureColumn 执行调用方提供的硬编码迁移语句；已存在列时忽略。
+// 不接受动态标识符，避免未来把外部输入误接入 DDL。
+func (s *Store) ensureColumn(statement string) error {
+	_, err := s.db.Exec(statement)
 	if err != nil && strings.Contains(err.Error(), "duplicate column") {
 		return nil
 	}
@@ -141,22 +143,73 @@ CREATE TABLE IF NOT EXISTS tasks (
 	}
 
 	// 旧库平滑迁移：补充新增列（存在则忽略）。
-	for _, c := range []struct{ table, col, decl string }{
-		{"subdomains", "task_id", "TEXT DEFAULT ''"},
-		{"ips", "task_id", "TEXT DEFAULT ''"},
-		{"ports", "task_id", "TEXT DEFAULT ''"},
-		{"ports", "product", "TEXT DEFAULT ''"},
-		{"ports", "version", "TEXT DEFAULT ''"},
-		{"ports", "confidence", "INTEGER DEFAULT 0"},
-		{"sites", "task_id", "TEXT DEFAULT ''"},
-		{"sites", "screenshot", "TEXT DEFAULT ''"},
-		{"tasks", "stage", "TEXT DEFAULT ''"},
+	for _, statement := range []string{
+		`ALTER TABLE subdomains ADD COLUMN task_id TEXT DEFAULT ''`,
+		`ALTER TABLE ips ADD COLUMN task_id TEXT DEFAULT ''`,
+		`ALTER TABLE ports ADD COLUMN task_id TEXT DEFAULT ''`,
+		`ALTER TABLE ports ADD COLUMN product TEXT DEFAULT ''`,
+		`ALTER TABLE ports ADD COLUMN version TEXT DEFAULT ''`,
+		`ALTER TABLE ports ADD COLUMN confidence INTEGER DEFAULT 0`,
+		`ALTER TABLE sites ADD COLUMN task_id TEXT DEFAULT ''`,
+		`ALTER TABLE sites ADD COLUMN screenshot TEXT DEFAULT ''`,
+		`ALTER TABLE tasks ADD COLUMN stage TEXT DEFAULT ''`,
 	} {
-		if err := s.ensureColumn(c.table, c.col, c.decl); err != nil {
+		if err := s.ensureColumn(statement); err != nil {
 			return err
 		}
 	}
-	return s.migrateTaskScopedAssets()
+	if err := s.migrateTaskScopedAssets(); err != nil {
+		return err
+	}
+	return s.migrateTaskParams()
+}
+
+// migrateTaskParams 清除旧任务快照中的凭据。无效 JSON 已无法可靠恢复，重置为空对象，
+// 避免损坏数据继续保留或通过诊断接口泄漏历史敏感值。
+func (s *Store) migrateTaskParams() error {
+	rows, err := s.db.Query(`SELECT id, params FROM tasks WHERE params <> ''`)
+	if err != nil {
+		return fmt.Errorf("读取任务参数迁移数据: %w", err)
+	}
+	type taskParams struct{ id, params string }
+	var pending []taskParams
+	for rows.Next() {
+		var item taskParams
+		if err := rows.Scan(&item.id, &item.params); err != nil {
+			rows.Close()
+			return fmt.Errorf("读取任务参数: %w", err)
+		}
+		pending = append(pending, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("遍历任务参数: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	for _, item := range pending {
+		var params map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(item.params), &params); err != nil || params == nil {
+			params = map[string]json.RawMessage{}
+		}
+		_, hadFofaKey := params["fofa_key"]
+		_, hadProxyURL := params["proxy_url"]
+		delete(params, "fofa_key")
+		delete(params, "proxy_url")
+		if !hadFofaKey && !hadProxyURL && len(params) > 0 {
+			continue
+		}
+		clean, err := json.Marshal(params)
+		if err != nil {
+			return fmt.Errorf("序列化清理后的任务参数: %w", err)
+		}
+		if _, err := s.db.Exec(`UPDATE tasks SET params=? WHERE id=?`, string(clean), item.id); err != nil {
+			return fmt.Errorf("清理任务参数: %w", err)
+		}
+	}
+	return nil
 }
 
 // migrateTaskScopedAssets 将旧版“资产全局唯一、task_id 被后一次扫描覆盖”的表结构，

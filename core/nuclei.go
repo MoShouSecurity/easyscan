@@ -37,11 +37,12 @@ var pocTemplates = []pocTemplate{
 
 // runNuclei 对站点执行内置 POC 检测，命中结果以 leak 记录形式返回。
 func runNuclei(ctx context.Context, site Site, taskID string, timeout time.Duration) []Leak {
-	client := defaultHTTPClient(timeout)
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
+	scope, err := newSiteScope(site)
+	if err != nil {
+		return nil
 	}
-	base := strings.TrimSuffix(site.URL, "/")
+	client := scope.client(timeout, 0)
+	base := strings.TrimSuffix(scope.baseURL, "/")
 
 	var out []Leak
 	for _, tpl := range pocTemplates {
@@ -163,10 +164,14 @@ func loadNucleiTemplates(dir string) ([]NucleiTemplate, error) {
 
 // runNucleiYAML 对站点执行自定义 nuclei 模板，命中以 leak 记录返回。
 func runNucleiYAML(ctx context.Context, site Site, taskID string, templates []NucleiTemplate, timeout time.Duration) []Leak {
-	base := strings.TrimSuffix(site.URL, "/")
+	scope, err := newSiteScope(site)
+	if err != nil {
+		return nil
+	}
+	base := strings.TrimSuffix(scope.baseURL, "/")
 	var out []Leak
 	for _, tpl := range templates {
-		if url, status, ok := matchNucleiTemplate(ctx, tpl, base, timeout); ok {
+		if url, status, ok := matchNucleiTemplate(ctx, tpl, scope, base, timeout); ok {
 			name := tpl.Info.Name
 			if name == "" {
 				name = tpl.ID
@@ -195,11 +200,8 @@ func firstPath(t NucleiTemplate) string {
 }
 
 // matchNucleiTemplate 执行单个模板，命中返回命中的 URL 与响应状态码。
-func matchNucleiTemplate(ctx context.Context, tpl NucleiTemplate, base string, timeout time.Duration) (string, int, bool) {
-	client := defaultHTTPClient(timeout)
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
+func matchNucleiTemplate(ctx context.Context, tpl NucleiTemplate, scope siteScope, base string, timeout time.Duration) (string, int, bool) {
+	client := scope.client(timeout, 0)
 
 	for _, req := range tpl.Requests {
 		method := strings.ToUpper(req.Method)
@@ -207,7 +209,7 @@ func matchNucleiTemplate(ctx context.Context, tpl NucleiTemplate, base string, t
 			method = http.MethodGet
 		}
 		for _, p := range req.Path {
-			url := expandPath(p, base)
+			url := expandPath(p, base, scope)
 			if url == "" {
 				continue
 			}
@@ -231,11 +233,11 @@ func matchNucleiTemplate(ctx context.Context, tpl NucleiTemplate, base string, t
 }
 
 // expandPath 替换模板变量（MVP 支持 {{BaseURL}} 与 {{RootURL}}）。
-func expandPath(p, base string) string {
+func expandPath(p, base string, scope siteScope) string {
 	p = strings.ReplaceAll(p, "{{BaseURL}}", base)
 	p = strings.ReplaceAll(p, "{{RootURL}}", base)
 	p = strings.ReplaceAll(p, "{{Hostname}}", strings.TrimPrefix(strings.TrimPrefix(base, "http://"), "https://"))
-	if !strings.HasPrefix(p, "http") {
+	if !scope.allowsOrigin(p) {
 		return ""
 	}
 	return p

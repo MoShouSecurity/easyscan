@@ -107,7 +107,7 @@
   <span style="flex:1"></span>
   <button class="ghost" id="cfgBtn" onclick="openConfig()">⚙ 配置</button>
   <button class="primary" id="addBtn" onclick="openAddTask()">＋ 添加任务</button>
-  <button class="primary" id="exportBtn" style="display:none" onclick="exportCurrent()">导出 CSV</button>
+  <button class="primary" id="exportBtn" style="display:none" onclick="exportCurrent()">导出</button>
 </div>
 
 <div class="content" id="view"></div>
@@ -199,6 +199,32 @@
     <div class="actions">
       <button class="ghost" onclick="closeConfig()">取消</button>
       <button class="primary" onclick="saveConfig()">保存配置</button>
+    </div>
+  </div>
+</div>
+
+<!-- 导出模态框 -->
+<div class="modal-mask" id="exportModal">
+  <div class="modal" style="width:430px">
+    <h2>导出任务资产</h2>
+    <label>文件格式</label>
+    <select id="exportFormat">
+      <option value="csv">CSV（兼容 Excel / WPS）</option>
+      <option value="json">JSON（结构化数据）</option>
+      <option value="xlsx">XLSX（按资产类型分工作表）</option>
+    </select>
+    <label>资产类型</label>
+    <div class="opts">
+      <div class="check"><input type="checkbox" class="export-asset" value="subdomains" checked /><span>子域名</span></div>
+      <div class="check"><input type="checkbox" class="export-asset" value="ips" checked /><span>存活 IP</span></div>
+      <div class="check"><input type="checkbox" class="export-asset" value="ports" checked /><span>端口与服务</span></div>
+      <div class="check"><input type="checkbox" class="export-asset" value="sites" checked /><span>站点与指纹</span></div>
+      <div class="check"><input type="checkbox" class="export-asset" value="leaks" checked /><span>敏感信息泄漏</span></div>
+    </div>
+    <div style="margin-top:12px;color:var(--muted);font-size:11px;line-height:1.6">导出文件保存在 Easy Scan 配置目录的 exports 子目录中。</div>
+    <div class="actions">
+      <button class="ghost" onclick="closeExport()">取消</button>
+      <button class="primary" id="exportSubmit" onclick="confirmExport()">开始导出</button>
     </div>
   </div>
 </div>
@@ -428,11 +454,32 @@ async function loadThumb(siteID, path) {
 }
 
 /* ---------- 导出 ---------- */
-async function exportTask(taskID) {
+let pendingExportTaskID = null;
+function openExport(taskID) {
+  pendingExportTaskID = taskID;
+  document.getElementById('exportModal').classList.add('show');
+}
+function closeExport() {
+  pendingExportTaskID = null;
+  document.getElementById('exportModal').classList.remove('show');
+}
+async function confirmExport() {
+  if (!pendingExportTaskID) return;
+  const assetTypes = [...document.querySelectorAll('.export-asset:checked')].map(el => el.value);
+  if (!assetTypes.length) { toast('请至少选择一种资产类型', true); return; }
+  const btn = document.getElementById('exportSubmit');
+  btn.disabled = true;
+  btn.textContent = '导出中…';
   try {
-    const path = await go.ExportTask(taskID);
+    const path = await go.ExportTaskWithOptions({
+      task_id: pendingExportTaskID,
+      format: document.getElementById('exportFormat').value,
+      asset_types: assetTypes,
+    });
+    closeExport();
     toast('已导出: ' + path);
   } catch(e) { toast('导出失败: ' + e, true); }
+  finally { btn.disabled = false; btn.textContent = '开始导出'; }
 }
 
 /* ---------- 添加任务 ---------- */
@@ -649,7 +696,7 @@ function cancelDelete() {
   document.getElementById('deleteModal').classList.remove('show');
 }
 async function exportCurrent() {
-  if (state.taskID) await exportTask(state.taskID);
+  if (state.taskID) openExport(state.taskID);
 }
 
 /* ---------- 轮询 ---------- */

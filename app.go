@@ -1,10 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -531,99 +529,4 @@ func pathWithin(dir, path string) bool {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
-}
-
-// ---- 导出 ----
-
-// ExportTask 将任务资产导出为 CSV 文件，返回文件路径。
-func (a *App) ExportTask(taskID string) (string, error) {
-	if a.store == nil {
-		return "", fmt.Errorf("存储未初始化")
-	}
-	// taskID 必须为 32 位 hex（服务端生成的合法 ID），且任务必须存在，
-	// 防路径穿越（taskID 直接拼入文件名）与任意内容导出。
-	if !hexIDRegexp.MatchString(taskID) {
-		return "", fmt.Errorf("非法的任务 ID")
-	}
-	if _, err := a.store.GetTask(taskID); err != nil {
-		return "", fmt.Errorf("任务不存在: %w", err)
-	}
-
-	subs, err := a.store.ListSubdomainsByTask(taskID, -1)
-	if err != nil {
-		return "", fmt.Errorf("读取子域名: %w", err)
-	}
-	ports, err := a.store.ListPortsByTask(taskID, -1)
-	if err != nil {
-		return "", fmt.Errorf("读取端口: %w", err)
-	}
-	sites, err := a.store.ListSitesByTask(taskID, -1)
-	if err != nil {
-		return "", fmt.Errorf("读取站点: %w", err)
-	}
-	leaks, err := a.store.ListLeaksByTask(taskID, -1)
-	if err != nil {
-		return "", fmt.Errorf("读取泄漏结果: %w", err)
-	}
-
-	var buf bytes.Buffer
-	buf.WriteString("\uFEFF") // BOM，保证 Excel 正确识别中文
-	w := csv.NewWriter(&buf)
-	writeRow := func(row []string) error {
-		if err := w.Write(row); err != nil {
-			return fmt.Errorf("生成 CSV: %w", err)
-		}
-		return nil
-	}
-	if err := writeRow([]string{"类型", "值1", "值2", "值3"}); err != nil {
-		return "", err
-	}
-	for _, s := range subs {
-		if err := writeRow([]string{"子域名", csvSafe(s.Subdomain), csvSafe(s.IP), csvSafe(s.Source)}); err != nil {
-			return "", err
-		}
-	}
-	for _, p := range ports {
-		if err := writeRow([]string{"端口", csvSafe(p.IP), fmt.Sprintf("%d", p.Port), csvSafe(p.Service)}); err != nil {
-			return "", err
-		}
-	}
-	for _, s := range sites {
-		if err := writeRow([]string{"站点", csvSafe(s.URL), csvSafe(s.Title), csvSafe(s.Fingerprint)}); err != nil {
-			return "", err
-		}
-	}
-	for _, l := range leaks {
-		if err := writeRow([]string{"敏感信息", csvSafe(l.URL), csvSafe(l.Type), csvSafe(l.Path)}); err != nil {
-			return "", err
-		}
-	}
-	w.Flush()
-	if err := w.Error(); err != nil {
-		return "", fmt.Errorf("生成 CSV: %w", err)
-	}
-
-	dir := filepath.Join(a.configDir, "exports")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("创建导出目录: %w", err)
-	}
-	path := filepath.Join(dir, "task_"+taskID+".csv")
-	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
-		return "", err
-	}
-	return path, nil
-}
-
-// csvSafe 防 CSV 公式注入（CWE-1236）：来自被扫描站点的不可信内容
-// 以 = + - @ 或制表符/回车开头时，Excel/WPS 会将其解释为公式。
-// 前置单引号使其成为纯文本。
-func csvSafe(v string) string {
-	if v == "" {
-		return v
-	}
-	switch v[0] {
-	case '=', '+', '-', '@', '\t', '\r':
-		return "'" + v
-	}
-	return v
 }

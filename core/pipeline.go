@@ -108,7 +108,7 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, s
 		}
 		report("子域名枚举", fmt.Sprintf("共发现 %d 个子域名", len(subs)), 20)
 	} else {
-		saved, _ := e.store.ListSubdomains(domain, 0)
+		saved := e.taskSubdomains(taskID, domain)
 		for _, sd := range saved {
 			subs[sd.Subdomain] = true
 		}
@@ -130,7 +130,7 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, s
 		// 枚举阶段入库的历史 IP（FOFA 收录等）：子域名已不解析时兜底进扫描，
 		// 解析成功时也一并纳入（失效 IP 由端口扫描前的存活探测拦截）。
 		historical := map[string][]string{}
-		if saved, err := e.store.ListSubdomains(domain, 0); err == nil {
+		if saved, err := e.store.ListSubdomains(domain, -1); err == nil {
 			for _, sd := range saved {
 				if sd.IP != "" {
 					historical[sd.Subdomain] = appendUnique(historical[sd.Subdomain], sd.IP)
@@ -161,7 +161,7 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, s
 		}
 		report("DNS 解析", fmt.Sprintf("解析到 %d 个存活子域名 / %d 个独立 IP", len(resolved), len(keysOfSlice(ipHosts))), 30)
 	} else {
-		saved, _ := e.store.ListSubdomains(domain, 0)
+		saved := e.taskSubdomains(taskID, domain)
 		for _, sd := range saved {
 			if sd.IP != "" {
 				ipHosts[sd.IP] = appendUnique(ipHosts[sd.IP], sd.Subdomain)
@@ -182,7 +182,7 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, s
 		e.updateStage(taskID, StagePortScan)
 		sites = e.scanPortsAndSites(ctx, ips, nil, ipHosts, taskID, report, 30, 60)
 	} else {
-		sites, _ = e.store.ListSitesByTask(taskID, 0)
+		sites, _ = e.store.ListSitesByTask(taskID, -1)
 	}
 
 	if ctx.Err() != nil {
@@ -196,6 +196,18 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, s
 	}
 
 	return nil
+}
+
+// taskSubdomains 优先恢复当前任务的数据；旧数据库中任务关联可能为空，
+// 此时回退到该根域名的最新全局记录，保证升级后的旧任务仍可恢复。
+func (e *Engine) taskSubdomains(taskID, domain string) []Subdomain {
+	if taskID != "" {
+		if saved, err := e.store.ListSubdomainsByTask(taskID, -1); err == nil && len(saved) > 0 {
+			return saved
+		}
+	}
+	saved, _ := e.store.ListSubdomains(domain, -1)
+	return saved
 }
 
 // ScanIPs 对 IP 或 CIDR 网段执行端口扫描流程。startStage 用于断点续扫。
@@ -218,7 +230,7 @@ func (e *Engine) ScanIPs(ctx context.Context, target string, taskID string, star
 		report("端口扫描", fmt.Sprintf("目标 %d 个 IP (模式: %s) ...", len(ips), e.opts.PortMode), 1)
 		sites = e.scanPortsAndSites(ctx, ips, nmapTargets, nil, taskID, report, 0, 90)
 	} else {
-		sites, _ = e.store.ListSitesByTask(taskID, 0)
+		sites, _ = e.store.ListSitesByTask(taskID, -1)
 	}
 
 	if ctx.Err() != nil {
@@ -241,7 +253,7 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 	// 合并任务已有站点（如 FOFA 端口线索在枚举阶段直接探测入库的），
 	// 保证它们进入后续泄漏/POC/截图等附加流程。
 	if taskID != "" {
-		if saved, err := e.store.ListSitesByTask(taskID, 0); err == nil {
+		if saved, err := e.store.ListSitesByTask(taskID, -1); err == nil {
 			for _, s := range saved {
 				siteMap[s.URL] = s
 			}
@@ -258,6 +270,7 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 	// 只有 confirmed 才入库「IP存活」，避免把网段内不存在的 IP 大量收录。
 	alive := ips
 	confirmed := map[string]bool{}
+	recorded := map[string]bool{}
 	discovered := false // 是否已通过探测获得存活结果
 	if e.opts.NoPing {
 		report("IP存活确认", "目标禁 ping，跳过存活确认直接扫描", base)
@@ -308,16 +321,18 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 
 	// recordAlive 确认存活 IP 入库（即使无开放端口也记录，详情页「IP存活」显示）。
 	recordAlive := func(ip string) {
-		if confirmed[ip] {
+		if recorded[ip] {
 			return
 		}
 		confirmed[ip] = true
-		_ = e.store.UpsertIP(IP{
+		if err := e.store.UpsertIP(IP{
 			ID:        newID(),
 			IP:        ip,
 			TaskID:    taskID,
 			CreatedAt: nowUnix(),
-		})
+		}); err == nil {
+			recorded[ip] = true
+		}
 	}
 	for ip := range confirmed {
 		recordAlive(ip)
@@ -326,7 +341,12 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 	// 2. nmap 端口扫描 + 服务/版本识别。
 	if nmap.Available() {
 		report("端口扫描", fmt.Sprintf("nmap 服务识别 %d 个存活 IP (模式: %s) ...", len(alive), e.opts.PortMode), base+span/10)
-		hosts, err := nmap.Scan(ctx, alive, e.opts.PortMode, e.opts.PortSpec)
+		scanTargets := alive
+		if e.opts.NoPing && len(nmapTargets) > 0 {
+			// 禁 ping 时保留原始 CIDR，避免把 /16 展开成数万个命令行目标。
+			scanTargets = nmapTargets
+		}
+		hosts, err := nmap.Scan(ctx, scanTargets, e.opts.PortMode, e.opts.PortSpec)
 		if err == nil {
 			for _, h := range hosts {
 				if len(h.Ports) > 0 {
@@ -484,7 +504,7 @@ func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, r
 	}
 	if e.opts.Screenshot {
 		report("站点截图", fmt.Sprintf("截图 %d 个站点", len(sites)), pct)
-		shot, err := NewScreenshotter(e.opts.ChromePath, e.opts.ScreenshotDir)
+		shot, err := NewScreenshotterContext(ctx, e.opts.ChromePath, e.opts.ScreenshotDir)
 		if err != nil {
 			report("站点截图", "截图器初始化失败: "+err.Error(), pct)
 			return
@@ -494,7 +514,7 @@ func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, r
 			saved := false
 			for _, u := range ScreenshotCandidates(site.URL) {
 				if path, err := shot.Capture(u); err == nil {
-					_ = e.store.SetSiteScreenshot(site.URL, path)
+					_ = e.store.SetSiteScreenshot(taskID, site.URL, path)
 					saved = true
 					break
 				}
@@ -548,14 +568,8 @@ func isWebPort(port int) bool {
 
 // IsIPTarget 判断目标是否为 IP 或 CIDR 网段。
 func IsIPTarget(target string) bool {
-	t := strings.TrimSpace(target)
-	if net.ParseIP(t) != nil {
-		return true
-	}
-	if _, _, err := net.ParseCIDR(t); err == nil {
-		return true
-	}
-	return false
+	_, err := splitTargets(target)
+	return err == nil
 }
 
 // splitTargets 拆分并校验目标字符串，返回去重后的 IP/CIDR 条目（保持原样，供 nmap 使用）。

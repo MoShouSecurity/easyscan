@@ -7,6 +7,16 @@ import (
 	"strings"
 )
 
+// ValidatePortMode 校验端口扫描模式，避免未知值在不同扫描后端静默降级。
+func ValidatePortMode(mode string) error {
+	switch mode {
+	case "test", "top100", "top1000", "all", "custom":
+		return nil
+	default:
+		return fmt.Errorf("未知的端口模式: %s", mode)
+	}
+}
+
 // portList 返回给定模式对应的端口列表。custom 模式使用 spec 指定的端口（范围语法）。
 func portList(mode, spec string) []int {
 	switch mode {

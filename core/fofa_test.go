@@ -176,7 +176,7 @@ func TestFofaTimeout(t *testing.T) {
 	}
 }
 
-// TestPersistEnumerated 验证枚举入库：首次写入、冲突不覆盖 source、无 IP 入库、nil store 防御。
+// TestPersistEnumerated 验证枚举入库：首次写入、任务隔离、无 IP 入库、nil store 防御。
 func TestPersistEnumerated(t *testing.T) {
 	s, err := OpenStore("")
 	if err != nil {
@@ -197,15 +197,20 @@ func TestPersistEnumerated(t *testing.T) {
 		t.Fatalf("入库记录 = %+v; want source=subfinder ip=空 task=task-fofa", got)
 	}
 
-	// 冲突：另一源更新同一子域名，source 不被覆盖，ip/task_id 更新。
+	// 另一任务写入同一子域名时，两份任务结果必须各自保留。
 	_ = s.UpsertSubdomain(Subdomain{ID: newID(), Domain: domain, Subdomain: "a.example.com", IP: "1.2.3.4", Source: "resolved", TaskID: "task-other", CreatedAt: nowUnix()})
-	subs, _ = s.ListSubdomains(domain, 0)
-	for _, sd := range subs {
-		if sd.Subdomain == "a.example.com" {
-			if sd.Source != "subfinder" || sd.IP != "1.2.3.4" || sd.TaskID != "task-other" {
-				t.Fatalf("冲突后记录 = %+v; want source 保留 subfinder、ip/task 更新", sd)
-			}
+	original, err := s.ListSubdomainsByTask(taskID, 0)
+	if err != nil || len(original) != 2 {
+		t.Fatalf("原任务记录 = %+v err=%v", original, err)
+	}
+	for _, sd := range original {
+		if sd.Subdomain == "a.example.com" && (sd.Source != "subfinder" || sd.IP != "" || sd.TaskID != taskID) {
+			t.Fatalf("另一任务覆盖了原任务记录: %+v", sd)
 		}
+	}
+	other, err := s.ListSubdomainsByTask("task-other", 0)
+	if err != nil || len(other) != 1 || other[0].IP != "1.2.3.4" || other[0].Source != "resolved" {
+		t.Fatalf("另一任务记录 = %+v err=%v", other, err)
 	}
 
 	// nil store 防御（不 panic）。

@@ -1,9 +1,15 @@
 package core
 
 import (
+	"context"
+	"database/sql"
+	"net"
 	"net/http"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOpenStoreAndRoundtrip(t *testing.T) {
@@ -159,6 +165,7 @@ func TestIsIPTarget(t *testing.T) {
 		"1.2.3.4":         true,
 		"10.0.0.0/24":     true,
 		"2001:db8::1":     true,
+		"1.2.3.4,5.6.7.8": true,
 		"example.com":     false,
 		"www.example.com": false,
 		"example.com/24":  false,
@@ -276,5 +283,172 @@ func TestTaskFilterAndSearch(t *testing.T) {
 	}
 	if _, err := s.GetTask(taskA); err == nil {
 		t.Fatal("删除后任务仍存在")
+	}
+}
+
+func TestTaskAssetsRemainIsolated(t *testing.T) {
+	s, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	const taskA = "task-a"
+	const taskB = "task-b"
+	now := nowUnix()
+	for _, taskID := range []string{taskA, taskB} {
+		if err := s.CreateTask(&Task{ID: taskID, Target: "example.com", Type: TaskDomain, Status: TaskFinished, CreatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.UpsertSubdomain(Subdomain{ID: newID(), Domain: "example.com", Subdomain: "www.example.com", IP: "192.0.2.1", TaskID: taskID, CreatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.UpsertIP(IP{ID: newID(), IP: "192.0.2.1", TaskID: taskID, CreatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.UpsertPort(Port{ID: newID(), IP: "192.0.2.1", Port: 443, Protocol: "tcp", Service: "https", TaskID: taskID, CreatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.UpsertSite(Site{ID: newID(), IP: "192.0.2.1", Port: 443, URL: "https://www.example.com:443/", TaskID: taskID, CreatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for _, taskID := range []string{taskA, taskB} {
+		ports, err := s.ListPortsByTask(taskID, 0)
+		if err != nil || len(ports) != 1 {
+			t.Fatalf("ListPortsByTask(%s) = %+v, err=%v", taskID, ports, err)
+		}
+	}
+	if count, err := s.PortCount(); err != nil || count != 1 {
+		t.Fatalf("global PortCount = %d, err=%v; want deduplicated count 1", count, err)
+	}
+
+	if err := s.DeleteTask(taskB); err != nil {
+		t.Fatal(err)
+	}
+	ports, err := s.ListPortsByTask(taskA, 0)
+	if err != nil || len(ports) != 1 {
+		t.Fatalf("deleting task B damaged task A: ports=%+v err=%v", ports, err)
+	}
+	sites, err := s.ListSitesByTask(taskA, 0)
+	if err != nil || len(sites) != 1 {
+		t.Fatalf("deleting task B damaged task A: sites=%+v err=%v", sites, err)
+	}
+}
+
+func TestLegacyStoreMigratesTaskScopedAssets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE ports (
+		id TEXT PRIMARY KEY, ip TEXT NOT NULL, port INTEGER NOT NULL,
+		protocol TEXT DEFAULT 'tcp', service TEXT DEFAULT '', banner TEXT DEFAULT '',
+		title TEXT DEFAULT '', created_at INTEGER NOT NULL,
+		UNIQUE(ip, port, protocol)
+	)`)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := OpenStore(path)
+	if err != nil {
+		t.Fatalf("OpenStore legacy migration: %v", err)
+	}
+	defer s.Close()
+	for _, taskID := range []string{"old-task", "new-task"} {
+		if err := s.UpsertPort(Port{ID: newID(), IP: "192.0.2.2", Port: 80, Protocol: "tcp", TaskID: taskID, CreatedAt: nowUnix()}); err != nil {
+			t.Fatalf("UpsertPort after migration: %v", err)
+		}
+	}
+	for _, taskID := range []string{"old-task", "new-task"} {
+		ports, err := s.ListPortsByTask(taskID, 0)
+		if err != nil || len(ports) != 1 {
+			t.Fatalf("migrated task %s ports=%+v err=%v", taskID, ports, err)
+		}
+	}
+}
+
+func TestTaskStateUpdatePreservesStageAndPause(t *testing.T) {
+	s, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	task := &Task{ID: "task-state", Target: "example.com", Type: TaskDomain, Status: TaskRunning, CreatedAt: nowUnix()}
+	if err := s.CreateTask(task); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateTaskStage(task.ID, StageDNS); err != nil {
+		t.Fatal(err)
+	}
+	task.Message = "DNS 解析: 处理中"
+	if updated, err := s.UpdateTaskIfStatus(task, TaskRunning); err != nil || !updated {
+		t.Fatalf("UpdateTaskIfStatus updated=%v err=%v", updated, err)
+	}
+	paused, err := s.PauseTask(task.ID, "已暂停")
+	if err != nil || !paused {
+		t.Fatalf("PauseTask paused=%v err=%v", paused, err)
+	}
+	task.Status = TaskFinished
+	if updated, err := s.UpdateTaskIfStatus(task, TaskRunning); err != nil || updated {
+		t.Fatalf("finished update must not overwrite paused: updated=%v err=%v", updated, err)
+	}
+	got, err := s.GetTask(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != TaskPaused || got.Stage != StageDNS {
+		t.Fatalf("task state=%s stage=%s; want paused/%s", got.Status, got.Stage, StageDNS)
+	}
+}
+
+func TestConfirmedAliveIPIsPersistedWithoutOpenScanPort(t *testing.T) {
+	probeListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("local listener unavailable: %v", err)
+	}
+	defer probeListener.Close()
+	probePort := probeListener.Addr().(*net.TCPAddr).Port
+
+	closedListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("local listener unavailable: %v", err)
+	}
+	closedPort := closedListener.Addr().(*net.TCPAddr).Port
+	closedListener.Close()
+
+	oldProbePorts := hostProbePorts
+	hostProbePorts = []int{probePort}
+	defer func() { hostProbePorts = oldProbePorts }()
+
+	s, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	engine := NewEngine(s, ScanOptions{
+		PortMode:    "custom",
+		PortSpec:    strconv.Itoa(closedPort),
+		NmapPath:    filepath.Join(t.TempDir(), "missing-nmap"),
+		MasscanPath: filepath.Join(t.TempDir(), "missing-masscan"),
+		Concurrency: 1,
+		Timeout:     100 * time.Millisecond,
+	})
+	engine.scanPortsAndSites(context.Background(), []string{"127.0.0.1"}, nil, nil, "alive-task", func(string, string, int) {}, 0, 90)
+	ips, err := s.ListIPsByTask("alive-task", 0)
+	if err != nil || len(ips) != 1 || ips[0].IP != "127.0.0.1" {
+		t.Fatalf("confirmed alive IPs=%+v err=%v; want 127.0.0.1", ips, err)
+	}
+	ports, err := s.ListPortsByTask("alive-task", 0)
+	if err != nil || len(ports) != 0 {
+		t.Fatalf("closed scan port unexpectedly persisted: %+v err=%v", ports, err)
 	}
 }

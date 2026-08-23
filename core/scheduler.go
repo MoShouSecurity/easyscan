@@ -9,21 +9,19 @@ import (
 
 // Scheduler 进程内任务调度器：提交侦察任务，由 worker 池异步执行并落库。
 type Scheduler struct {
-	store  *Store
-	opts   ScanOptions
-	queue  chan *Task
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-	mu     sync.Mutex
-	tasks  map[string]context.CancelFunc // taskID -> cancel，支持单任务暂停
+	store     *Store
+	opts      ScanOptions
+	queue     chan *Task
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	mu        sync.Mutex
+	enqueueMu sync.Mutex                    // 串行化入队与容量检查，保证状态变更后一定能入队
+	tasks     map[string]context.CancelFunc // taskID -> cancel，支持单任务暂停
 }
 
-// NewScheduler 构造调度器。workers 为并发 worker 数。
-func NewScheduler(store *Store, opts ScanOptions, workers int) *Scheduler {
-	if workers <= 0 {
-		workers = 2
-	}
+// NewScheduler 构造调度器；调用 Start 指定 worker 数后开始消费任务。
+func NewScheduler(store *Store, opts ScanOptions) *Scheduler {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Scheduler{
 		store:  store,
@@ -55,7 +53,10 @@ func (s *Scheduler) Stop() {
 
 // Submit 创建并提交一个任务，返回任务记录（状态为 pending）。
 func (s *Scheduler) Submit(target string, typ TaskType, opts ScanOptions) (*Task, error) {
-	params, _ := json.Marshal(opts)
+	params, err := json.Marshal(opts)
+	if err != nil {
+		return nil, fmt.Errorf("序列化扫描参数: %w", err)
+	}
 	t := &Task{
 		ID:        newID(),
 		Target:    target,
@@ -67,42 +68,80 @@ func (s *Scheduler) Submit(target string, typ TaskType, opts ScanOptions) (*Task
 	if err := s.store.CreateTask(t); err != nil {
 		return nil, err
 	}
-	// 队列满时非阻塞返回错误，避免 Wails 主线程永久挂起（UI 冻结）。
-	select {
-	case s.queue <- t:
-		return t, nil
-	default:
+
+	s.enqueueMu.Lock()
+	defer s.enqueueMu.Unlock()
+	if s.ctx.Err() != nil {
+		t.Status = TaskFailed
+		t.Message = "调度器已停止"
+		t.FinishedAt = nowUnix()
+		_ = s.store.UpdateTask(t)
+		return nil, fmt.Errorf("调度器已停止")
+	}
+	// 所有发送方都持有 enqueueMu；worker 只会腾出容量，因此检查后发送不会阻塞。
+	if len(s.queue) >= cap(s.queue) {
 		t.Status = TaskFailed
 		t.Message = "任务队列已满，请稍后重试"
 		t.FinishedAt = nowUnix()
 		_ = s.store.UpdateTask(t)
 		return nil, fmt.Errorf("任务队列已满，请稍后重试")
 	}
+	s.queue <- t
+	return t, nil
 }
 
-// Resume 重新入队执行任务（用于恢复暂停的任务）。队列满时返回错误。
+// Resume 原子地把暂停任务改为 pending 并重新入队。队列满时不改变原状态。
 func (s *Scheduler) Resume(t *Task) error {
-	select {
-	case s.queue <- t:
-		return nil
-	default:
+	s.enqueueMu.Lock()
+	defer s.enqueueMu.Unlock()
+	if s.ctx.Err() != nil {
+		return fmt.Errorf("调度器已停止")
+	}
+	if len(s.queue) >= cap(s.queue) {
 		return fmt.Errorf("任务队列已满，请稍后重试")
 	}
+	queued, err := s.store.QueuePausedTask(t.ID, "恢复中")
+	if err != nil {
+		return err
+	}
+	if !queued {
+		return fmt.Errorf("任务不在暂停状态")
+	}
+	t.Status = TaskPending
+	t.Message = "恢复中"
+	s.queue <- t
+	return nil
 }
 
-// CancelTask 取消指定任务（暂停用）。
-func (s *Scheduler) CancelTask(taskID string) {
+// CancelTask 取消指定的运行中任务，返回任务是否正在 worker 中执行。
+func (s *Scheduler) CancelTask(taskID string) bool {
 	s.mu.Lock()
 	cancel := s.tasks[taskID]
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
+		return true
 	}
+	return false
+}
+
+// IsTaskActive 返回任务是否仍在 worker 中执行（取消后到完全退出之间也为 true）。
+func (s *Scheduler) IsTaskActive(taskID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, ok := s.tasks[taskID]
+	return ok
 }
 
 func (s *Scheduler) worker() {
 	defer s.wg.Done()
 	for {
+		// 优先响应整体关闭，避免取消后仍随机取出大量排队任务。
+		select {
+		case <-s.ctx.Done():
+			return
+		default:
+		}
 		select {
 		case <-s.ctx.Done():
 			return
@@ -113,18 +152,14 @@ func (s *Scheduler) worker() {
 }
 
 func (s *Scheduler) run(t *Task) {
-	// 引擎内任何 panic（如第三方库）都不应带崩整个 GUI 进程：捕获后把任务标记为失败。
-	defer func() {
-		if r := recover(); r != nil {
-			t.Status = TaskFailed
-			t.FinishedAt = nowUnix()
-			t.Message = fmt.Sprintf("任务异常终止: %v", r)
-			_ = s.store.UpdateTask(t)
-		}
-	}()
-
 	var opts ScanOptions
-	_ = json.Unmarshal([]byte(t.Params), &opts)
+	if err := json.Unmarshal([]byte(t.Params), &opts); err != nil {
+		t.Status = TaskFailed
+		t.FinishedAt = nowUnix()
+		t.Message = "解析任务参数失败: " + err.Error()
+		_, _ = s.store.UpdateTaskIfStatus(t, TaskPending)
+		return
+	}
 	if opts.Concurrency == 0 {
 		opts = s.opts
 	}
@@ -140,35 +175,51 @@ func (s *Scheduler) run(t *Task) {
 		s.mu.Unlock()
 		cancel()
 	}()
+	// 引擎内任何 panic（如第三方库）都不应带崩整个 GUI 进程：捕获后把任务标记为失败。
+	defer func() {
+		if r := recover(); r != nil {
+			t.Status = TaskFailed
+			t.FinishedAt = nowUnix()
+			t.Message = fmt.Sprintf("任务异常终止: %v", r)
+			_, _ = s.store.UpdateTaskIfStatus(t, TaskRunning)
+		}
+	}()
 
 	engine := NewEngine(s.store, opts)
-	update := func(status TaskStatus, progress int, msg string) {
+	updateRunning := func(status TaskStatus, progress int, msg string) bool {
 		t.Status = status
 		t.Progress = progress
 		t.Message = msg
 		if status == TaskFinished || status == TaskFailed {
 			t.FinishedAt = nowUnix()
 		}
-		_ = s.store.UpdateTask(t)
+		updated, _ := s.store.UpdateTaskIfStatus(t, TaskRunning)
+		return updated
 	}
 
-	update(TaskRunning, 0, "任务启动")
+	t.Status = TaskRunning
+	t.Message = "任务启动"
+	started, err := s.store.UpdateTaskIfStatus(t, TaskPending)
+	if err != nil || !started {
+		return // 已暂停或删除的排队任务不再执行
+	}
 
-	err := engine.ScanTarget(ctx, t.Target, t.Type, t.ID, t.Stage, func(stage, detail string, progress int) {
-		update(TaskRunning, progress, stage+": "+detail)
+	err = engine.ScanTarget(ctx, t.Target, t.Type, t.ID, t.Stage, func(stage, detail string, progress int) {
+		if ctx.Err() == nil {
+			updateRunning(TaskRunning, progress, stage+": "+detail)
+		}
 	})
 
-	if err != nil {
-		if ctx.Err() != nil {
-			if s.ctx.Err() != nil {
-				// 调度器整体关闭（非单任务暂停）：标记 paused，
-				// 与启动时的 MarkInterruptedTasks 兜底一致。
-				update(TaskPaused, t.Progress, "程序关闭，任务已暂停")
-			}
-			return // 单任务暂停取消，状态由 PauseTask 处理
+	// 即使某个模块吞掉了 context 错误，也不能把已暂停任务误标为完成。
+	if ctx.Err() != nil {
+		if s.ctx.Err() != nil {
+			updateRunning(TaskPaused, t.Progress, "程序关闭，任务已暂停")
 		}
-		update(TaskFailed, 100, err.Error())
 		return
 	}
-	update(TaskFinished, 100, "完成")
+	if err != nil {
+		updateRunning(TaskFailed, 100, err.Error())
+		return
+	}
+	updateRunning(TaskFinished, 100, "完成")
 }

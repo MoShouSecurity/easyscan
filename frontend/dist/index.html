@@ -159,8 +159,8 @@
       <button class="ghost" onclick="openSubfinderConfig()">打开/生成</button>
     </div>
     <div class="row">
-      <div><label>并发度</label><input type="text" id="cfgConcurrency" /></div>
-      <div><label>超时（秒）</label><input type="text" id="cfgTimeout" /></div>
+      <div><label>并发度</label><input type="number" id="cfgConcurrency" min="1" max="2000" /></div>
+      <div><label>超时（秒）</label><input type="number" id="cfgTimeout" min="1" max="300" /></div>
     </div>
     <div class="row">
       <div><label>默认端口模式</label>

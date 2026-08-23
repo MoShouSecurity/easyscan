@@ -5,14 +5,21 @@ package core
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"sync/atomic"
 	"time"
 )
+
+var fallbackIDCounter atomic.Uint64
 
 // newID 生成 16 字节随机 ID。
 func newID() string {
 	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+	if _, err := rand.Read(b); err == nil {
+		return hex.EncodeToString(b)
+	}
+	// 系统熵源异常时仍生成进程内唯一的 32 位 hex ID，避免全零 ID 冲突。
+	return fmt.Sprintf("%016x%016x", uint64(time.Now().UnixNano()), fallbackIDCounter.Add(1))
 }
 
 func nowUnix() int64 { return time.Now().Unix() }

@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 
 	"easyscan/core"
 
@@ -30,8 +32,9 @@ type App struct {
 	sched      *core.Scheduler
 	configDir  string
 	configPath string
+	configMu   sync.RWMutex
 	config     core.Config
-	forceClose bool
+	forceClose atomic.Bool
 }
 
 // NewApp 构造 App（尚未初始化 store，等待 OnStartup）。
@@ -42,11 +45,19 @@ func (a *App) startup(ctx context.Context) {
 
 	dir, err := os.UserConfigDir()
 	if err != nil || dir == "" {
-		dir = "."
+		if err != nil {
+			println("resolve config dir:", err.Error())
+		} else {
+			println("resolve config dir: empty path")
+		}
+		return
 	}
 	dir = filepath.Join(dir, "EasyScan")
 	a.configDir = dir
-	_ = os.MkdirAll(dir, 0o700) // 配置目录 0700：含 config.yaml（FOFA key）与数据库
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		println("create config dir:", err.Error())
+		return
+	}
 	dbPath := filepath.Join(dir, "easyscan.db")
 
 	// 加载配置（不存在则写入默认配置）。
@@ -57,9 +68,14 @@ func (a *App) startup(ctx context.Context) {
 		cfg = core.DefaultConfig()
 	}
 	if _, statErr := os.Stat(a.configPath); os.IsNotExist(statErr) {
-		_ = cfg.Save(a.configPath)
+		if err := cfg.Save(a.configPath); err != nil {
+			println("save default config:", err.Error())
+			return
+		}
 	}
+	a.configMu.Lock()
 	a.config = cfg
+	a.configMu.Unlock()
 
 	store, err := core.OpenStore(dbPath)
 	if err != nil {
@@ -71,7 +87,7 @@ func (a *App) startup(ctx context.Context) {
 	if err := store.MarkInterruptedTasks(); err != nil {
 		println("mark interrupted tasks:", err.Error())
 	}
-	a.sched = core.NewScheduler(store, a.config.ToOptions(), 2)
+	a.sched = core.NewScheduler(store, cfg.ToOptions())
 	a.sched.Start(2)
 }
 
@@ -86,7 +102,7 @@ func (a *App) shutdown(_ context.Context) {
 
 // beforeClose 窗口关闭前回调：有运行中任务时阻止关闭并提醒前端。
 func (a *App) beforeClose(ctx context.Context) bool {
-	if a.forceClose {
+	if a.forceClose.Load() {
 		return false
 	}
 	if a.hasRunningTasks() {
@@ -114,7 +130,7 @@ func (a *App) hasRunningTasks() bool {
 
 // ForceClose 用户确认关闭后调用，标记允许退出。
 func (a *App) ForceClose() {
-	a.forceClose = true
+	a.forceClose.Store(true)
 }
 
 // ScanRequest 新建任务的请求参数。
@@ -135,9 +151,12 @@ func (a *App) StartScan(req ScanRequest) (string, error) {
 	if a.sched == nil {
 		return "", fmt.Errorf("调度器未初始化")
 	}
-	opts := a.config.ToOptions()
+	opts := a.currentConfig().ToOptions()
 	if req.PortMode != "" {
 		opts.PortMode = req.PortMode
+	}
+	if err := core.ValidatePortMode(opts.PortMode); err != nil {
+		return "", err
 	}
 	// 仅非空时覆盖：保留配置里的 DefaultPortSpec 默认值。
 	if req.PortSpec != "" {
@@ -180,6 +199,8 @@ func (a *App) StartScan(req ScanRequest) (string, error) {
 		if err := core.ValidateDomain(clean); err != nil {
 			return "", fmt.Errorf("目标域名非法: %w", err)
 		}
+	} else if !core.IsIPTarget(req.Target) {
+		return "", fmt.Errorf("目标 IP 或网段非法")
 	}
 
 	task, err := a.sched.Submit(req.Target, typ, opts)
@@ -193,14 +214,14 @@ func (a *App) StartScan(req ScanRequest) (string, error) {
 
 func (a *App) ListTasks() ([]core.Task, error) {
 	if a.store == nil {
-		return nil, nil
+		return nil, fmt.Errorf("存储未初始化")
 	}
 	return a.store.ListTasks(200)
 }
 
 func (a *App) GetTask(id string) (core.Task, error) {
 	if a.store == nil {
-		return core.Task{}, nil
+		return core.Task{}, fmt.Errorf("存储未初始化")
 	}
 	t, err := a.store.GetTask(id)
 	if err != nil {
@@ -214,6 +235,12 @@ func (a *App) DeleteTask(id string) error {
 	if a.store == nil {
 		return fmt.Errorf("存储未初始化")
 	}
+	if a.sched != nil && a.sched.IsTaskActive(id) {
+		return fmt.Errorf("任务仍在运行或停止中，请先暂停并稍后重试")
+	}
+	if _, err := a.store.GetTask(id); err != nil {
+		return fmt.Errorf("任务不存在: %w", err)
+	}
 	return a.store.DeleteTask(id)
 }
 
@@ -226,13 +253,16 @@ func (a *App) RescanTask(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	opts := a.config.ToOptions()
+	cfg := a.currentConfig()
+	opts := cfg.ToOptions()
 	if t.Params != "" {
-		_ = json.Unmarshal([]byte(t.Params), &opts)
+		if err := json.Unmarshal([]byte(t.Params), &opts); err != nil {
+			return "", fmt.Errorf("旧任务参数损坏: %w", err)
+		}
 	}
 	// 旧任务的 params 快照可能不含最新配置，覆盖为当前值（防旧 key 复活/丢失）。
-	opts.FofaKey = a.config.Fofa.APIKey
-	opts.ProxyURL = a.config.Proxy.HTTPURL
+	opts.FofaKey = cfg.Fofa.APIKey
+	opts.ProxyURL = cfg.Proxy.HTTPURL
 	task, err := a.sched.Submit(t.Target, t.Type, opts)
 	if err != nil {
 		return "", err
@@ -245,19 +275,19 @@ func (a *App) PauseTask(id string) error {
 	if a.sched == nil {
 		return fmt.Errorf("调度器未初始化")
 	}
-	// 先读状态：仅运行中任务可暂停，避免取消与自然完成竞态时
-	// 把刚完成的 finished 任务改写为 paused。
-	t, err := a.store.GetTask(id)
+	a.sched.CancelTask(id)
+	paused, err := a.store.PauseTask(id, "已暂停")
 	if err != nil {
 		return err
 	}
-	if t.Status != core.TaskRunning {
-		return fmt.Errorf("任务不在运行中（当前状态: %s）", t.Status)
+	if !paused {
+		t, getErr := a.store.GetTask(id)
+		if getErr != nil {
+			return getErr
+		}
+		return fmt.Errorf("任务不可暂停（当前状态: %s）", t.Status)
 	}
-	a.sched.CancelTask(id)
-	t.Status = core.TaskPaused
-	t.Message = "已暂停"
-	return a.store.UpdateTask(t)
+	return nil
 }
 
 // ResumeTask 恢复暂停的任务（复用原参数继续扫描）。
@@ -269,11 +299,6 @@ func (a *App) ResumeTask(id string) error {
 	if err != nil {
 		return err
 	}
-	t.Status = core.TaskPending
-	t.Message = "恢复中"
-	if err := a.store.UpdateTask(t); err != nil {
-		return err
-	}
 	return a.sched.Resume(t)
 }
 
@@ -281,28 +306,28 @@ func (a *App) ResumeTask(id string) error {
 
 func (a *App) ListDomains() ([]core.Domain, error) {
 	if a.store == nil {
-		return nil, nil
+		return nil, fmt.Errorf("存储未初始化")
 	}
 	return a.store.ListDomains(0)
 }
 
 func (a *App) ListSubdomains(domain string) ([]core.Subdomain, error) {
 	if a.store == nil {
-		return nil, nil
+		return nil, fmt.Errorf("存储未初始化")
 	}
 	return a.store.ListSubdomains(domain, 0)
 }
 
 func (a *App) ListPorts() ([]core.Port, error) {
 	if a.store == nil {
-		return nil, nil
+		return nil, fmt.Errorf("存储未初始化")
 	}
 	return a.store.ListPorts(0)
 }
 
 func (a *App) ListSites() ([]core.Site, error) {
 	if a.store == nil {
-		return nil, nil
+		return nil, fmt.Errorf("存储未初始化")
 	}
 	return a.store.ListSites(0)
 }
@@ -311,28 +336,28 @@ func (a *App) ListSites() ([]core.Site, error) {
 
 func (a *App) ListPortsByTask(taskID string) ([]core.Port, error) {
 	if a.store == nil {
-		return nil, nil
+		return nil, fmt.Errorf("存储未初始化")
 	}
 	return a.store.ListPortsByTask(taskID, 0)
 }
 
 func (a *App) ListSitesByTask(taskID string) ([]core.Site, error) {
 	if a.store == nil {
-		return nil, nil
+		return nil, fmt.Errorf("存储未初始化")
 	}
 	return a.store.ListSitesByTask(taskID, 0)
 }
 
 func (a *App) ListLeaksByTask(taskID string) ([]core.Leak, error) {
 	if a.store == nil {
-		return nil, nil
+		return nil, fmt.Errorf("存储未初始化")
 	}
 	return a.store.ListLeaksByTask(taskID, 0)
 }
 
 func (a *App) ListSubdomainsByTask(taskID string) ([]core.Subdomain, error) {
 	if a.store == nil {
-		return nil, nil
+		return nil, fmt.Errorf("存储未初始化")
 	}
 	return a.store.ListSubdomainsByTask(taskID, 0)
 }
@@ -340,7 +365,7 @@ func (a *App) ListSubdomainsByTask(taskID string) ([]core.Subdomain, error) {
 // ListIPsByTask 返回任务发现的存活 IP（含无开放端口的）。
 func (a *App) ListIPsByTask(taskID string) ([]core.IP, error) {
 	if a.store == nil {
-		return nil, nil
+		return nil, fmt.Errorf("存储未初始化")
 	}
 	return a.store.ListIPsByTask(taskID, 0)
 }
@@ -349,7 +374,7 @@ func (a *App) ListIPsByTask(taskID string) ([]core.IP, error) {
 
 func (a *App) Search(query string) ([]core.SearchResult, error) {
 	if a.store == nil {
-		return nil, nil
+		return nil, fmt.Errorf("存储未初始化")
 	}
 	return a.store.Search(query, 0)
 }
@@ -358,7 +383,13 @@ func (a *App) Search(query string) ([]core.SearchResult, error) {
 
 // GetConfig 返回当前全局配置。
 func (a *App) GetConfig() (core.Config, error) {
-	return a.config, nil
+	return a.currentConfig(), nil
+}
+
+func (a *App) currentConfig() core.Config {
+	a.configMu.RLock()
+	defer a.configMu.RUnlock()
+	return a.config
 }
 
 // SaveConfig 保存配置到配置文件。
@@ -366,7 +397,9 @@ func (a *App) SaveConfig(cfg core.Config) error {
 	if err := cfg.Save(a.configPath); err != nil {
 		return err
 	}
+	a.configMu.Lock()
 	a.config = cfg
+	a.configMu.Unlock()
 	return nil
 }
 
@@ -378,21 +411,33 @@ func (a *App) ConfigPath() string {
 // DownloadNucleiTemplates 下载官方 nuclei 模板库并更新配置中的模板目录。
 func (a *App) DownloadNucleiTemplates() (string, error) {
 	dest := filepath.Join(a.configDir, "nuclei-templates")
-	if err := core.DownloadNucleiTemplates(dest, a.config.Nuclei.TemplatesRepo); err != nil {
+	cfg := a.currentConfig()
+	if err := core.DownloadNucleiTemplates(dest, cfg.Nuclei.TemplatesRepo); err != nil {
 		return "", err
 	}
-	a.config.Nuclei.TemplatesDir = dest
-	_ = a.config.Save(a.configPath)
+	cfg.Nuclei.TemplatesDir = dest
+	if err := cfg.Save(a.configPath); err != nil {
+		return "", fmt.Errorf("模板已下载，但保存配置失败: %w", err)
+	}
+	a.configMu.Lock()
+	a.config = cfg
+	a.configMu.Unlock()
 	return dest, nil
 }
 
 // OpenSubfinderProviderConfig 生成（如不存在）并用系统默认编辑器打开 subfinder provider-config 文件。
 func (a *App) OpenSubfinderProviderConfig() (string, error) {
-	path := a.config.Subfinder.ProviderConfig
+	cfg := a.currentConfig()
+	path := cfg.Subfinder.ProviderConfig
 	if path == "" {
 		path = filepath.Join(a.configDir, "provider-config.yaml")
-		a.config.Subfinder.ProviderConfig = path
-		_ = a.config.Save(a.configPath)
+		cfg.Subfinder.ProviderConfig = path
+		if err := cfg.Save(a.configPath); err != nil {
+			return "", err
+		}
+		a.configMu.Lock()
+		a.config = cfg
+		a.configMu.Unlock()
 	}
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		if err := core.GenerateSubfinderProviderConfig(path); err != nil {
@@ -424,8 +469,9 @@ func openFile(path string) error {
 	case "darwin":
 		cmd = exec.Command("open", path)
 	case "windows":
-		cmd = exec.Command("cmd", "/c", "start", "", path)
-		core.HideCmdWindow(cmd) // 只隐藏 cmd 窗口本身，start 打开的目标程序正常显示
+		// 不经 cmd /c start，避免配置路径中的 shell 元字符被 cmd.exe 解释。
+		cmd = exec.Command("rundll32.exe", "url.dll,FileProtocolHandler", path)
+		core.HideCmdWindow(cmd)
 	default:
 		cmd = exec.Command("xdg-open", path)
 	}
@@ -494,33 +540,66 @@ func (a *App) ExportTask(taskID string) (string, error) {
 		return "", fmt.Errorf("任务不存在: %w", err)
 	}
 
-	subs, _ := a.store.ListSubdomainsByTask(taskID, 0)
-	ports, _ := a.store.ListPortsByTask(taskID, 0)
-	sites, _ := a.store.ListSitesByTask(taskID, 0)
-	leaks, _ := a.store.ListLeaksByTask(taskID, 0)
+	subs, err := a.store.ListSubdomainsByTask(taskID, -1)
+	if err != nil {
+		return "", fmt.Errorf("读取子域名: %w", err)
+	}
+	ports, err := a.store.ListPortsByTask(taskID, -1)
+	if err != nil {
+		return "", fmt.Errorf("读取端口: %w", err)
+	}
+	sites, err := a.store.ListSitesByTask(taskID, -1)
+	if err != nil {
+		return "", fmt.Errorf("读取站点: %w", err)
+	}
+	leaks, err := a.store.ListLeaksByTask(taskID, -1)
+	if err != nil {
+		return "", fmt.Errorf("读取泄漏结果: %w", err)
+	}
 
 	var buf bytes.Buffer
 	buf.WriteString("\uFEFF") // BOM，保证 Excel 正确识别中文
 	w := csv.NewWriter(&buf)
-	_ = w.Write([]string{"类型", "值1", "值2", "值3"})
+	writeRow := func(row []string) error {
+		if err := w.Write(row); err != nil {
+			return fmt.Errorf("生成 CSV: %w", err)
+		}
+		return nil
+	}
+	if err := writeRow([]string{"类型", "值1", "值2", "值3"}); err != nil {
+		return "", err
+	}
 	for _, s := range subs {
-		_ = w.Write([]string{"子域名", csvSafe(s.Subdomain), csvSafe(s.IP), s.Source})
+		if err := writeRow([]string{"子域名", csvSafe(s.Subdomain), csvSafe(s.IP), csvSafe(s.Source)}); err != nil {
+			return "", err
+		}
 	}
 	for _, p := range ports {
-		_ = w.Write([]string{"端口", p.IP, fmt.Sprintf("%d", p.Port), csvSafe(p.Service)})
+		if err := writeRow([]string{"端口", csvSafe(p.IP), fmt.Sprintf("%d", p.Port), csvSafe(p.Service)}); err != nil {
+			return "", err
+		}
 	}
 	for _, s := range sites {
-		_ = w.Write([]string{"站点", csvSafe(s.URL), csvSafe(s.Title), csvSafe(s.Fingerprint)})
+		if err := writeRow([]string{"站点", csvSafe(s.URL), csvSafe(s.Title), csvSafe(s.Fingerprint)}); err != nil {
+			return "", err
+		}
 	}
 	for _, l := range leaks {
-		_ = w.Write([]string{"敏感信息", csvSafe(l.URL), csvSafe(l.Type), csvSafe(l.Path)})
+		if err := writeRow([]string{"敏感信息", csvSafe(l.URL), csvSafe(l.Type), csvSafe(l.Path)}); err != nil {
+			return "", err
+		}
 	}
 	w.Flush()
+	if err := w.Error(); err != nil {
+		return "", fmt.Errorf("生成 CSV: %w", err)
+	}
 
 	dir := filepath.Join(a.configDir, "exports")
-	_ = os.MkdirAll(dir, 0o700) // 配置目录 0700：含 config.yaml（FOFA key）与数据库
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("创建导出目录: %w", err)
+	}
 	path := filepath.Join(dir, "task_"+taskID+".csv")
-	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
 		return "", err
 	}
 	return path, nil

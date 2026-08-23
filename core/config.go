@@ -2,10 +2,16 @@ package core
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"time"
 
 	"gopkg.in/yaml.v3"
+)
+
+const (
+	MaxScanConcurrency = 2000
+	MaxScanTimeoutSec  = 300
 )
 
 // ScanOptions 描述一次侦察任务的策略参数。
@@ -146,17 +152,52 @@ func LoadConfig(path string) (Config, error) {
 	if cfg.Nuclei.TemplatesRepo == "" {
 		cfg.Nuclei.TemplatesRepo = DefaultConfig().Nuclei.TemplatesRepo
 	}
+	if err := cfg.Validate(); err != nil {
+		return DefaultConfig(), fmt.Errorf("校验配置: %w", err)
+	}
 	return cfg, nil
 }
 
 // Save 将配置写入 YAML 文件。
 func (c Config) Save(path string) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
 	data, err := yaml.Marshal(&c)
 	if err != nil {
 		return err
 	}
 	// 0o600：配置文件含 FOFA key 等敏感信息，仅本人可读写。
-	return os.WriteFile(path, data, 0o600)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	// os.WriteFile 的 mode 不会收紧已存在文件的权限，需显式 chmod。
+	return os.Chmod(path, 0o600)
+}
+
+// Validate 校验来自配置文件和前端桥接的参数，防止异常并发/超时造成资源耗尽。
+func (c Config) Validate() error {
+	if c.Scan.Concurrency < 1 || c.Scan.Concurrency > MaxScanConcurrency {
+		return fmt.Errorf("并发度需在 1-%d 之间", MaxScanConcurrency)
+	}
+	if c.Scan.TimeoutSec < 1 || c.Scan.TimeoutSec > MaxScanTimeoutSec {
+		return fmt.Errorf("超时需在 1-%d 秒之间", MaxScanTimeoutSec)
+	}
+	if err := ValidatePortMode(c.Scan.DefaultPortMode); err != nil {
+		return err
+	}
+	if c.Scan.DefaultPortMode == "custom" {
+		if _, err := ParsePortSpec(c.Scan.DefaultPortSpec); err != nil {
+			return fmt.Errorf("默认自定义端口无效: %w", err)
+		}
+	}
+	if c.Proxy.HTTPURL != "" {
+		u, err := url.Parse(c.Proxy.HTTPURL)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("HTTP 代理地址无效: %q", c.Proxy.HTTPURL)
+		}
+	}
+	return nil
 }
 
 // ToOptions 将全局配置的默认参数合入任务策略。

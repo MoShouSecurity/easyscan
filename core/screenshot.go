@@ -27,6 +27,14 @@ type Screenshotter struct {
 
 // NewScreenshotter 构造截图器。chromePath 为空时由 chromedp 自动探测 Chrome。
 func NewScreenshotter(chromePath, dir string) (*Screenshotter, error) {
+	return NewScreenshotterContext(context.Background(), chromePath, dir)
+}
+
+// NewScreenshotterContext 构造可随父任务取消的截图器。
+func NewScreenshotterContext(parent context.Context, chromePath, dir string) (*Screenshotter, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
 	opts := []chromedp.ExecAllocatorOption{
 		// headless=new：Chromium 新版无头模式，完全离屏渲染。
 		// 进程不触碰屏幕采集 API（CGWindowList/CGDisplay 等），不触发
@@ -43,7 +51,7 @@ func NewScreenshotter(chromePath, dir string) (*Screenshotter, error) {
 		opts = append([]chromedp.ExecAllocatorOption{chromedp.ExecPath(chromePath)}, opts...)
 	}
 
-	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
+	allocCtx, allocCancel := chromedp.NewExecAllocator(parent, opts...)
 	ctx, ctxCancel := chromedp.NewContext(allocCtx)
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {

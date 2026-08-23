@@ -43,6 +43,34 @@ func TestConfigRoundTrip(t *testing.T) {
 	}
 }
 
+func TestConfigValidationAndPermissions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := DefaultConfig()
+	if err := cfg.Save(path); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(path); err != nil {
+		t.Fatal(err)
+	} else if info.Mode().Perm() != 0o600 {
+		t.Fatalf("config permissions = %o; want 600", info.Mode().Perm())
+	}
+
+	invalid := []Config{DefaultConfig(), DefaultConfig(), DefaultConfig(), DefaultConfig()}
+	invalid[0].Scan.Concurrency = 0
+	invalid[1].Scan.Concurrency = MaxScanConcurrency + 1
+	invalid[2].Scan.DefaultPortMode = "unknown"
+	invalid[3].Proxy.HTTPURL = "file:///tmp/proxy"
+	for i, candidate := range invalid {
+		if err := candidate.Validate(); err == nil {
+			t.Errorf("invalid config %d passed validation", i)
+		}
+	}
+}
+
 func TestLoadLeakDict(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "dict.txt")

@@ -141,6 +141,7 @@ type ScanRequest struct {
 	NoPing     bool   `json:"no_ping"`
 	Nuclei     bool   `json:"nuclei"`
 	FileLeak   bool   `json:"file_leak"`
+	Directory  bool   `json:"directory_scan"`
 	Screenshot bool   `json:"screenshot"`
 }
 
@@ -169,6 +170,7 @@ func (a *App) StartScan(req ScanRequest) (string, error) {
 	opts.NoPing = req.NoPing
 	opts.Nuclei = req.Nuclei
 	opts.FileLeak = req.FileLeak
+	opts.DirectoryScan = req.Directory
 	opts.Screenshot = req.Screenshot
 	if req.Screenshot {
 		opts.ScreenshotDir = filepath.Join(a.configDir, "screenshots")
@@ -351,6 +353,13 @@ func (a *App) ListLeaksByTask(taskID string) ([]core.Leak, error) {
 		return nil, fmt.Errorf("存储未初始化")
 	}
 	return a.store.ListLeaksByTask(taskID, 0)
+}
+
+func (a *App) ListDirectoriesByTask(taskID string) ([]core.DirectoryResult, error) {
+	if a.store == nil {
+		return nil, fmt.Errorf("存储未初始化")
+	}
+	return a.store.ListDirectoriesByTask(taskID, 0)
 }
 
 func (a *App) ListSubdomainsByTask(taskID string) ([]core.Subdomain, error) {

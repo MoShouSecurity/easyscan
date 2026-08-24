@@ -87,7 +87,11 @@ func TestDetectLeaksRejectsSoft404(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	leaks := detectLeaks(context.Background(), Site{URL: srv.URL}, "task", 2*time.Second, leakRules)
+	rules := []leakRule{{Path: "/.git/config", Type: "git", Sig: "[core]"}, {Path: "/.env", Type: "env"}}
+	leaks, err := detectLeaks(context.Background(), Site{URL: srv.URL}, "task", 2*time.Second, 10, rules)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(leaks) != 0 {
 		t.Fatalf("软 404 不应产生泄漏结果: %+v", leaks)
 	}

@@ -1,8 +1,12 @@
 package core
 
 import (
+	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
+	_ "embed"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -10,204 +14,180 @@ import (
 )
 
 // leakRule 敏感文件/信息泄漏探测规则。
-// Sig 为响应体命中签名（小写匹配），空则仅需状态码 200。
+// Sig 为响应体命中签名（不区分大小写），空则依靠状态码和软 404 基线判断。
 type leakRule struct {
 	Path string
 	Type string
 	Sig  string
 }
 
-// leakRules 内置文件泄漏字典。
-var leakRules = []leakRule{
-	{"/.git/config", "git", "[core]"},
-	{"/.git/HEAD", "git", "ref:"},
-	{"/.gitignore", "git", ""},
-	{"/.svn/entries", "svn", "dir"},
-	{"/.svn/wc.db", "svn", ""},
-	{"/.env", "env", ""},
-	{"/.env.local", "env", ""},
-	{"/.DS_Store", "ds_store", ""},
-	{"/.idea/workspace.xml", "idea", "project"},
-	{"/.vscode/settings.json", "vscode", ""},
-	{"/.htaccess", "htaccess", ""},
-	{"/.htpasswd", "htpasswd", ""},
-	{"/WEB-INF/web.xml", "java", "web-app"},
-	{"/WEB-INF/classes/application.properties", "java", "="},
-	{"/phpinfo.php", "phpinfo", "php version"},
-	{"/info.php", "phpinfo", "php version"},
-	{"/composer.json", "composer", "require"},
-	{"/package.json", "node", "\"name\""},
-	{"/package-lock.json", "node", "\"lockfileVersion\""},
-	{"/docker-compose.yml", "docker", "services:"},
-	{"/Dockerfile", "docker", "FROM"},
-	{"/backup.zip", "backup", ""},
-	{"/backup.tar.gz", "backup", ""},
-	{"/backup.sql", "backup", ""},
-	{"/www.zip", "backup", ""},
-	{"/wwwroot.zip", "backup", ""},
-	{"/db.sql", "backup", ""},
-	{"/database.sql", "backup", ""},
-	{"/config.php.bak", "backup", ""},
-	{"/web.config", "iis", "configuration"},
-	{"/robots.txt", "robots", ""},
-	{"/crossdomain.xml", "crossdomain", "cross-domain-policy"},
-	{"/sitemap.xml", "sitemap", "urlset"},
-}
+//go:embed dicts/leaks.tsv.gz
+var builtinLeakDictionary []byte
 
-// loadLeakDict 从字典文件加载泄漏规则。格式：每行 `路径 [类型]`，# 开头为注释，空行忽略。
+const builtinLeakRuleCount = 153737
+
+// loadLeakDict 从字典文件加载泄漏规则。格式：`路径 [类型] [响应签名]`。
 func loadLeakDict(path string) ([]leakRule, error) {
-	data, err := os.ReadFile(path)
+	info, err := os.Stat(path)
 	if err != nil {
 		return nil, err
 	}
-	var rules []leakRule
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimSpace(line)
+	if !info.Mode().IsRegular() || info.Size() > maxPathDictionarySize {
+		return nil, fmt.Errorf("字典必须是普通文件且不超过 %d 字节", maxPathDictionarySize)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	rules := make([]leakRule, 0)
+	seen := make(map[string]bool)
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64<<10), maxPathDictionarySize)
+	lineNumber := 0
+	for scanner.Scan() {
+		lineNumber++
+		line := strings.TrimSpace(strings.TrimPrefix(scanner.Text(), "\ufeff"))
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		fields := strings.Fields(line)
-		if len(fields) == 0 {
+		normalized, err := normalizeScanPath(fields[0])
+		if err != nil {
+			return nil, fmt.Errorf("字典第 %d 行: %w", lineNumber, err)
+		}
+		if seen[normalized] {
 			continue
 		}
-		rule := leakRule{Path: fields[0]}
+		seen[normalized] = true
+		rule := leakRule{Path: normalized, Type: inferLeakType(normalized)}
 		if len(fields) >= 2 {
-			rule.Type = fields[1]
-		} else {
-			rule.Type = inferLeakType(fields[0])
+			rule.Type = strings.ToLower(fields[1])
+		}
+		if len(fields) >= 3 {
+			rule.Sig = strings.Join(fields[2:], " ")
+		}
+		if rule.Type == "" || len(rule.Type) > 64 || len(rule.Sig) > 256 {
+			return nil, fmt.Errorf("字典第 %d 行: 类型或响应签名无效", lineNumber)
 		}
 		rules = append(rules, rule)
+		if len(rules) > maxPathDictionaryRows {
+			return nil, fmt.Errorf("字典条目超过 %d 条", maxPathDictionaryRows)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("读取字典: %w", err)
+	}
+	if len(rules) == 0 {
+		return nil, fmt.Errorf("字典没有有效路径")
 	}
 	return rules, nil
 }
 
-// inferLeakType 依据路径关键字自动推断泄露类型。
+// inferLeakType 依据路径特征推断泄漏类型，不把普通 PHP 文件归类为 phpinfo。
 func inferLeakType(path string) string {
 	p := strings.ToLower(path)
 	switch {
-	case strings.Contains(p, ".git"):
+	case strings.Contains(p, "/.git/") || strings.HasSuffix(p, "/.gitignore"):
 		return "git"
-	case strings.Contains(p, ".svn"):
+	case strings.Contains(p, "/.svn/"):
 		return "svn"
-	case strings.Contains(p, ".env"):
+	case strings.Contains(p, "/.hg/"):
+		return "hg"
+	case strings.Contains(p, "/.env"):
 		return "env"
-	case strings.Contains(p, "backup"), strings.HasSuffix(p, ".zip"), strings.HasSuffix(p, ".tar"),
-		strings.HasSuffix(p, ".gz"), strings.HasSuffix(p, ".sql"), strings.HasSuffix(p, ".bak"):
-		return "backup"
-	case strings.Contains(p, "phpinfo"), strings.HasSuffix(p, ".php"):
+	case strings.Contains(p, "phpinfo") || strings.HasSuffix(p, "/info.php"):
 		return "phpinfo"
-	case strings.Contains(p, "actuator"):
-		return "spring"
-	case strings.Contains(p, "swagger"), strings.Contains(p, "api-docs"):
-		return "swagger"
+	case strings.Contains(p, "credential") || strings.Contains(p, "passwd") || strings.Contains(p, "password") || strings.Contains(p, "secret"):
+		return "credential"
+	case strings.Contains(p, "backup") || strings.HasSuffix(p, ".zip") || strings.HasSuffix(p, ".tar") ||
+		strings.HasSuffix(p, ".gz") || strings.HasSuffix(p, ".bak"):
+		return "backup"
+	case strings.HasSuffix(p, ".sql") || strings.HasSuffix(p, ".db") || strings.HasSuffix(p, ".sqlite"):
+		return "database"
+	case strings.Contains(p, "config") || strings.HasSuffix(p, ".yml") || strings.HasSuffix(p, ".yaml") || strings.HasSuffix(p, ".properties"):
+		return "config"
 	default:
 		return "misc"
 	}
 }
 
-// detectLeaks 对一个站点探测敏感文件/信息泄漏，返回命中的泄漏记录。
-func detectLeaks(ctx context.Context, site Site, taskID string, timeout time.Duration, rules []leakRule) []Leak {
-	scope, err := newSiteScope(site)
+// detectLeaks 对一个站点流式探测敏感文件，rules 为 nil 时使用内置压缩字典。
+func detectLeaks(ctx context.Context, site Site, taskID string, timeout time.Duration, concurrency int, rules []leakRule) ([]Leak, error) {
+	hits, err := scanPathSource(ctx, site, timeout, concurrency, leakProbeSource(rules), func(status int) bool {
+		return status == http.StatusOK
+	})
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	client := scope.client(timeout, 0)
-	base := strings.TrimSuffix(scope.baseURL, "/")
-	baseline := fetchSoft404Baseline(ctx, client, base)
-
-	var out []Leak
-	for _, r := range rules {
-		url := base + r.Path
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		if err != nil {
+	out := make([]Leak, 0, len(hits))
+	for _, hit := range hits {
+		if hit.contentLength == 0 {
 			continue
-		}
-		req.Header.Set("User-Agent", "Mozilla/5.0 (EasyScan)")
-
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			continue
-		}
-		body, _ := readBodyLimited(resp.Body, 256<<10)
-		resp.Body.Close()
-
-		lower := strings.ToLower(string(body))
-		if r.Sig != "" && !strings.Contains(lower, strings.ToLower(r.Sig)) {
-			continue
-		}
-		if r.Sig == "" {
-			// 空签名规则必须区别于随机不存在路径；SPA/catch-all 的统一 200 页面不算泄漏。
-			if len(body) < 64 || baseline.matches(resp, body) {
-				continue
-			}
 		}
 		out = append(out, Leak{
 			ID:         newID(),
 			TaskID:     taskID,
-			URL:        url,
-			Path:       r.Path,
-			Type:       r.Type,
-			StatusCode: resp.StatusCode,
+			URL:        hit.url,
+			Path:       hit.path,
+			Type:       hit.kind,
+			StatusCode: hit.statusCode,
 			CreatedAt:  nowUnix(),
 		})
 	}
-	return out
+	return out, nil
 }
 
-type soft404Baseline struct {
-	status      int
-	contentType string
-	body        []byte
+func leakProbeSource(rules []leakRule) pathProbeSource {
+	return func(yield func(pathProbe) bool) error {
+		if rules != nil {
+			for _, rule := range rules {
+				normalized, err := normalizeScanPath(rule.Path)
+				if err != nil {
+					return err
+				}
+				if !yield(pathProbe{path: normalized, kind: rule.Type, signature: rule.Sig}) {
+					return nil
+				}
+			}
+			return nil
+		}
+		return forEachBuiltinLeakRule(func(rule leakRule) bool {
+			return yield(pathProbe{path: rule.Path, kind: rule.Type, signature: rule.Sig})
+		})
+	}
 }
 
-func fetchSoft404Baseline(ctx context.Context, client *http.Client, base string) soft404Baseline {
-	url := base + "/.easyscan-not-found-" + newID()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func forEachBuiltinLeakRule(yield func(leakRule) bool) error {
+	reader, err := gzip.NewReader(bytes.NewReader(builtinLeakDictionary))
 	if err != nil {
-		return soft404Baseline{}
+		return fmt.Errorf("打开内置泄漏字典: %w", err)
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (EasyScan)")
-	resp, err := client.Do(req)
-	if err != nil {
-		return soft404Baseline{}
-	}
-	defer resp.Body.Close()
-	body, _ := readBodyLimited(resp.Body, 256<<10)
-	return soft404Baseline{
-		status:      resp.StatusCode,
-		contentType: normalizedContentType(resp.Header.Get("Content-Type")),
-		body:        body,
-	}
-}
+	defer reader.Close()
 
-func (b soft404Baseline) matches(resp *http.Response, body []byte) bool {
-	if b.status == 0 || b.status != resp.StatusCode {
-		return false
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 64<<10), maxPathDictionarySize)
+	count := 0
+	for scanner.Scan() {
+		fields := strings.SplitN(scanner.Text(), "\t", 3)
+		if len(fields) != 3 || fields[1] == "" {
+			return fmt.Errorf("内置泄漏字典第 %d 行格式无效", count+1)
+		}
+		normalized, err := normalizeScanPath(fields[0])
+		if err != nil || normalized != fields[0] {
+			return fmt.Errorf("内置泄漏字典第 %d 行路径无效: %q", count+1, fields[0])
+		}
+		count++
+		if !yield(leakRule{Path: normalized, Type: fields[1], Sig: fields[2]}) {
+			return nil
+		}
 	}
-	if bytes.Equal(bytes.TrimSpace(b.body), bytes.TrimSpace(body)) {
-		return true
+	if err := scanner.Err(); err != nil {
+		return err
 	}
-	if b.contentType == "" || b.contentType != normalizedContentType(resp.Header.Get("Content-Type")) {
-		return false
+	if count != builtinLeakRuleCount {
+		return fmt.Errorf("内置泄漏字典条目数为 %d，期望 %d", count, builtinLeakRuleCount)
 	}
-	delta := len(b.body) - len(body)
-	if delta < 0 {
-		delta = -delta
-	}
-	tolerance := len(b.body) / 20 // 允许软 404 中时间戳、nonce 等造成约 5% 波动。
-	if tolerance < 64 {
-		tolerance = 64
-	}
-	return delta <= tolerance
-}
-
-func normalizedContentType(value string) string {
-	if i := strings.IndexByte(value, ';'); i >= 0 {
-		value = value[:i]
-	}
-	return strings.ToLower(strings.TrimSpace(value))
+	return nil
 }

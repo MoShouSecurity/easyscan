@@ -16,6 +16,7 @@ func TestConfigRoundTrip(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.FileLeak.DictPath = "/tmp/my-leak-dict.txt"
+	cfg.Directory.DictPath = "/tmp/my-directory-dict.txt"
 	cfg.Nuclei.TemplatesDir = "/tmp/my-templates"
 	cfg.Scan.Concurrency = 250
 	if err := cfg.Save(path); err != nil {
@@ -28,6 +29,9 @@ func TestConfigRoundTrip(t *testing.T) {
 	}
 	if loaded.FileLeak.DictPath != "/tmp/my-leak-dict.txt" {
 		t.Fatalf("DictPath = %q", loaded.FileLeak.DictPath)
+	}
+	if loaded.Directory.DictPath != "/tmp/my-directory-dict.txt" {
+		t.Fatalf("Directory.DictPath = %q", loaded.Directory.DictPath)
 	}
 	if loaded.Nuclei.TemplatesDir != "/tmp/my-templates" {
 		t.Fatalf("TemplatesDir = %q", loaded.Nuclei.TemplatesDir)
@@ -74,7 +78,7 @@ func TestConfigValidationAndPermissions(t *testing.T) {
 func TestLoadLeakDict(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "dict.txt")
-	content := "# 自定义泄漏字典\n/.git/config git\n/.env\n/backup.zip backup\n"
+	content := "# 自定义泄漏字典\n/.git/config git [core]\n/.env\n/backup.zip backup\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -87,6 +91,22 @@ func TestLoadLeakDict(t *testing.T) {
 	}
 	if rules[0].Type != "git" || rules[1].Type != "env" || rules[2].Type != "backup" {
 		t.Fatalf("rules = %+v", rules)
+	}
+	if rules[0].Sig != "[core]" {
+		t.Fatalf("signature = %q; want [core]", rules[0].Sig)
+	}
+	if got := inferLeakType("/index.php"); got == "phpinfo" {
+		t.Fatalf("ordinary PHP file inferred as phpinfo: %q", got)
+	}
+}
+
+func TestLoadLeakDictRejectsExternalURL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "dict.txt")
+	if err := os.WriteFile(path, []byte("https://outside.example/.env env\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadLeakDict(path); err == nil {
+		t.Fatal("外部 URL 不应作为文件泄漏路径")
 	}
 }
 

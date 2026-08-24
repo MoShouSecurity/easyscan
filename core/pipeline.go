@@ -524,7 +524,7 @@ func mapToSites(siteMap map[string]Site) []Site {
 	return sites
 }
 
-// postProcess 执行文件泄漏 / POC / 截图等附加模块。base 为起始进度（百分比）。
+// postProcess 执行文件泄漏、路径发现、POC 和截图等附加模块。base 为起始进度（百分比）。
 func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, report ProgressFunc, base int) error {
 	if len(sites) == 0 {
 		return nil
@@ -537,8 +537,8 @@ func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, r
 	pct := base
 
 	if e.opts.FileLeak {
-		report("文件泄漏检测", fmt.Sprintf("探测 %d 个站点", len(sites)), pct)
-		rules := leakRules
+		report("文件泄漏检测", fmt.Sprintf("探测 %d 个站点，内置敏感路径 %d 条", len(sites), builtinLeakRuleCount), pct)
+		var rules []leakRule // nil 表示流式使用内置压缩字典。
 		if e.opts.LeakDictPath != "" {
 			if custom, err := loadLeakDict(e.opts.LeakDictPath); err == nil && len(custom) > 0 {
 				rules = custom
@@ -548,7 +548,11 @@ func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, r
 			}
 		}
 		for _, site := range sites {
-			for _, leak := range detectLeaks(ctx, site, taskID, e.opts.Timeout, rules) {
+			leaks, err := detectLeaks(ctx, site, taskID, e.opts.Timeout, e.opts.Concurrency, rules)
+			if err != nil {
+				return fmt.Errorf("文件泄漏检测 %s: %w", site.URL, err)
+			}
+			for _, leak := range leaks {
 				if err := e.store.UpsertLeak(leak); err != nil {
 					return fmt.Errorf("保存泄漏结果 %s: %w", leak.URL, err)
 				}
@@ -556,6 +560,34 @@ func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, r
 		}
 		pct += 3
 		report("文件泄漏检测", "完成", pct)
+	}
+	if e.opts.DirectoryScan {
+		report("路径发现", fmt.Sprintf("探测 %d 个站点，内置路径 %d 条（目录 %d / 路由 %d / 文件 %d）", len(sites), builtinPathCount, builtinDirectoryCount, builtinRouteCount, builtinFileCount), pct)
+		var probes []pathProbe // nil 表示流式使用内置压缩字典。
+		if e.opts.DirectoryDictPath != "" {
+			if custom, err := loadDirectoryDict(e.opts.DirectoryDictPath); err == nil {
+				probes = custom
+				report("路径发现", fmt.Sprintf("加载自定义字典 %d 条", len(custom)), pct)
+			} else {
+				report("路径发现", "加载自定义字典失败，改用内置字典: "+err.Error(), pct)
+			}
+		}
+		for _, site := range sites {
+			results, err := detectDirectories(ctx, site, taskID, e.opts.Timeout, e.opts.Concurrency, probes)
+			if err != nil {
+				return fmt.Errorf("路径发现 %s: %w", site.URL, err)
+			}
+			for _, result := range results {
+				if err := e.store.UpsertDirectory(result); err != nil {
+					return fmt.Errorf("保存目录结果 %s: %w", result.URL, err)
+				}
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		pct += 3
+		report("路径发现", "完成", pct)
 	}
 	if e.opts.Nuclei {
 		report("POC 检测", fmt.Sprintf("检测 %d 个站点", len(sites)), pct)

@@ -18,14 +18,15 @@ import (
 )
 
 const (
-	exportSubdomains = "subdomains"
-	exportIPs        = "ips"
-	exportPorts      = "ports"
-	exportSites      = "sites"
-	exportLeaks      = "leaks"
+	exportSubdomains  = "subdomains"
+	exportIPs         = "ips"
+	exportPorts       = "ports"
+	exportSites       = "sites"
+	exportLeaks       = "leaks"
+	exportDirectories = "directories"
 )
 
-var exportAssetOrder = []string{exportSubdomains, exportIPs, exportPorts, exportSites, exportLeaks}
+var exportAssetOrder = []string{exportSubdomains, exportIPs, exportPorts, exportSites, exportLeaks, exportDirectories}
 
 // ExportRequest 定义一次资产导出的格式和范围。AssetTypes 为空表示导出全部资产。
 type ExportRequest struct {
@@ -35,14 +36,15 @@ type ExportRequest struct {
 }
 
 type exportData struct {
-	Task       core.Task         `json:"task"`
-	ExportedAt string            `json:"exported_at"`
-	AssetTypes []string          `json:"asset_types"`
-	Subdomains *[]core.Subdomain `json:"subdomains,omitempty"`
-	IPs        *[]core.IP        `json:"ips,omitempty"`
-	Ports      *[]core.Port      `json:"ports,omitempty"`
-	Sites      *[]core.Site      `json:"sites,omitempty"`
-	Leaks      *[]core.Leak      `json:"leaks,omitempty"`
+	Task        core.Task               `json:"task"`
+	ExportedAt  string                  `json:"exported_at"`
+	AssetTypes  []string                `json:"asset_types"`
+	Subdomains  *[]core.Subdomain       `json:"subdomains,omitempty"`
+	IPs         *[]core.IP              `json:"ips,omitempty"`
+	Ports       *[]core.Port            `json:"ports,omitempty"`
+	Sites       *[]core.Site            `json:"sites,omitempty"`
+	Leaks       *[]core.Leak            `json:"leaks,omitempty"`
+	Directories *[]core.DirectoryResult `json:"directories,omitempty"`
 }
 
 // ExportTask 保留旧版 Wails 接口，默认将全部资产导出为 CSV。
@@ -91,7 +93,7 @@ func normalizeAssetTypes(requested []string) ([]string, error) {
 	for _, item := range requested {
 		item = strings.ToLower(strings.TrimSpace(item))
 		switch item {
-		case exportSubdomains, exportIPs, exportPorts, exportSites, exportLeaks:
+		case exportSubdomains, exportIPs, exportPorts, exportSites, exportLeaks, exportDirectories:
 			wanted[item] = true
 		default:
 			return nil, fmt.Errorf("不支持的资产类型: %s", item)
@@ -154,6 +156,12 @@ func (a *App) loadExportData(taskID string, assetTypes []string) (exportData, er
 				return exportData{}, fmt.Errorf("读取泄漏结果: %w", err)
 			}
 			data.Leaks = &items
+		case exportDirectories:
+			items, err := a.store.ListDirectoriesByTask(taskID, -1)
+			if err != nil {
+				return exportData{}, fmt.Errorf("读取目录结果: %w", err)
+			}
+			data.Directories = &items
 		}
 	}
 	return data, nil
@@ -171,6 +179,7 @@ var csvHeaders = []string{
 	"资产类型", "ID", "任务ID", "根域名", "子域名", "IP", "端口", "协议", "服务", "产品",
 	"版本", "Banner", "标题", "置信度", "URL", "状态码", "Server", "指纹", "截图路径",
 	"泄漏路径", "泄漏类型", "来源", "创建时间",
+	"目录路径", "响应长度", "内容类型", "路径类型",
 }
 
 func renderCSV(data exportData) ([]byte, error) {
@@ -229,6 +238,15 @@ func renderCSV(data exportData) ([]byte, error) {
 		for _, item := range *data.Leaks {
 			row := blankCSVRow("泄漏", item.ID, item.TaskID, item.CreatedAt)
 			row[14], row[15], row[19], row[20] = item.URL, strconv.Itoa(item.StatusCode), item.Path, item.Type
+			if err := write(row); err != nil {
+				return nil, fmt.Errorf("生成 CSV: %w", err)
+			}
+		}
+	}
+	if data.Directories != nil {
+		for _, item := range *data.Directories {
+			row := blankCSVRow("路径", item.ID, item.TaskID, item.CreatedAt)
+			row[14], row[15], row[23], row[24], row[25], row[26] = item.URL, strconv.Itoa(item.StatusCode), item.Path, strconv.FormatInt(item.ContentLength, 10), item.ContentType, item.Kind
 			if err := write(row); err != nil {
 				return nil, fmt.Errorf("生成 CSV: %w", err)
 			}
@@ -339,6 +357,13 @@ func exportSheets(data exportData) []workbookSheet {
 		s := workbookSheet{name: "泄漏", headers: []string{"ID", "任务ID", "URL", "泄漏路径", "泄漏类型", "状态码", "创建时间"}}
 		for _, v := range *data.Leaks {
 			s.rows = append(s.rows, []interface{}{v.ID, v.TaskID, v.URL, v.Path, v.Type, v.StatusCode, formatTimestamp(v.CreatedAt)})
+		}
+		sheets = append(sheets, s)
+	}
+	if data.Directories != nil {
+		s := workbookSheet{name: "路径发现", headers: []string{"ID", "任务ID", "URL", "路径", "类型", "状态码", "响应长度", "内容类型", "创建时间"}}
+		for _, v := range *data.Directories {
+			s.rows = append(s.rows, []interface{}{v.ID, v.TaskID, v.URL, v.Path, v.Kind, v.StatusCode, v.ContentLength, v.ContentType, formatTimestamp(v.CreatedAt)})
 		}
 		sheets = append(sheets, s)
 	}

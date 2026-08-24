@@ -236,6 +236,9 @@ func TestTaskFilterAndSearch(t *testing.T) {
 	if err := s.UpsertLeak(Leak{ID: newID(), TaskID: taskA, URL: "http://api.example.com/.git/config", Path: "/.git/config", Type: "git", StatusCode: 200, CreatedAt: nowUnix()}); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.UpsertDirectory(DirectoryResult{ID: newID(), TaskID: taskA, URL: "http://api.example.com/admin", Path: "/admin", Kind: "directory", StatusCode: 403, ContentLength: 13, ContentType: "text/html", CreatedAt: nowUnix()}); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.UpsertIP(IP{ID: newID(), IP: "10.0.0.1", TaskID: taskA, CreatedAt: nowUnix()}); err != nil {
 		t.Fatal(err)
 	}
@@ -252,6 +255,10 @@ func TestTaskFilterAndSearch(t *testing.T) {
 	if len(leaksA) != 1 || leaksA[0].Type != "git" {
 		t.Fatalf("ListLeaksByTask(taskA) = %+v", leaksA)
 	}
+	directoriesA, _ := s.ListDirectoriesByTask(taskA, 0)
+	if len(directoriesA) != 1 || directoriesA[0].Path != "/admin" || directoriesA[0].Kind != "directory" || directoriesA[0].ContentLength != 13 {
+		t.Fatalf("ListDirectoriesByTask(taskA) = %+v", directoriesA)
+	}
 
 	// 搜索命中站点标题。
 	res, _ := s.Search("API Admin", 10)
@@ -264,6 +271,16 @@ func TestTaskFilterAndSearch(t *testing.T) {
 	if !found {
 		t.Fatalf("Search 未命中站点: %+v", res)
 	}
+	res, _ = s.Search("/admin", 10)
+	found = false
+	for _, r := range res {
+		if r.Type == "directory" && r.Value == "http://api.example.com/admin" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Search 未命中目录: %+v", res)
+	}
 
 	// 删除任务，验证关联资产一并删除。
 	if err := s.DeleteTask(taskA); err != nil {
@@ -274,6 +291,9 @@ func TestTaskFilterAndSearch(t *testing.T) {
 	}
 	if leaks, _ := s.ListLeaksByTask(taskA, 0); len(leaks) != 0 {
 		t.Fatalf("删除后泄漏仍存在: %+v", leaks)
+	}
+	if directories, _ := s.ListDirectoriesByTask(taskA, 0); len(directories) != 0 {
+		t.Fatalf("删除后目录仍存在: %+v", directories)
 	}
 	if ips, _ := s.ListIPsByTask(taskA, 0); len(ips) != 0 {
 		t.Fatalf("删除后存活 IP 仍存在: %+v", ips)
@@ -372,6 +392,38 @@ func TestLegacyStoreMigratesTaskScopedAssets(t *testing.T) {
 		if err != nil || len(ports) != 1 {
 			t.Fatalf("migrated task %s ports=%+v err=%v", taskID, ports, err)
 		}
+	}
+}
+
+func TestLegacyDirectoryResultsGainPathKind(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-directories.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE directories (
+		id TEXT PRIMARY KEY, task_id TEXT DEFAULT '', url TEXT NOT NULL, path TEXT DEFAULT '',
+		status_code INTEGER DEFAULT 0, content_length INTEGER DEFAULT 0,
+		content_type TEXT DEFAULT '', created_at INTEGER NOT NULL, UNIQUE(task_id, url)
+	);
+	INSERT INTO directories(id, task_id, url, path, status_code, created_at)
+	VALUES('legacy', 'task', 'https://example.com/admin', '/admin', 403, 1);`)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	results, err := store.ListDirectoriesByTask("task", 0)
+	if err != nil || len(results) != 1 || results[0].Kind != "route" {
+		t.Fatalf("migrated directory results=%+v err=%v", results, err)
 	}
 }
 

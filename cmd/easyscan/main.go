@@ -28,8 +28,8 @@ func main() {
 		proxy    = flag.String("proxy", "", "HTTP 代理（FOFA/subfinder 出站请求），如 http://127.0.0.1:7890")
 		fileLeak = flag.Bool("file-leak", false, "开启文件泄漏扫描")
 		leakDict = flag.String("leak-dict", "", "文件泄漏字典文件（每行：路径 [类型]）")
-		dirScan  = flag.Bool("dir-scan", false, "开启 Web 目录扫描")
-		dirDict  = flag.String("dir-dict", "", "目录扫描字典文件（一行一个路径）")
+		dirScan  = flag.Bool("dir-scan", false, "开启 Web 路径发现（目录/路由/文件）")
+		dirDict  = flag.String("dir-dict", "", "路径发现字典文件（路径后可附类型）")
 	)
 	flag.Parse()
 
@@ -187,9 +187,9 @@ func printSummary(store *core.Store, target string, typ core.TaskType) {
 
 	directories, _ := store.ListDirectoriesByTask("", 200)
 	if len(directories) > 0 {
-		fmt.Printf("\n目录发现: %d\n", len(directories))
+		fmt.Printf("\n路径发现: %d\n", len(directories))
 		for _, directory := range directories {
-			fmt.Printf("  %-6d %-8d %s\n", directory.StatusCode, directory.ContentLength, directory.URL)
+			fmt.Printf("  %-6d %-10s %-8d %s\n", directory.StatusCode, directory.Kind, directory.ContentLength, directory.URL)
 		}
 	}
 }

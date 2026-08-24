@@ -24,13 +24,13 @@ Easy Scan 是一款**跨平台桌面资产侦察工具**——单二进制 + SQL
 - **站点截图**：chromedp 无头浏览器，启动前自动检查 macOS 屏幕录制权限
 
 ### 漏洞检测
-- **文件泄漏检测**：30+ 内置敏感路径（.git/.svn/.env/备份文件/phpinfo/actuator），支持自定义字典，并通过响应签名与软 404 基线降低误报
-- **目录扫描**：内置常见后台/API/上传目录，支持一行一个路径的自定义字典，识别 200/3xx/401/403 并过滤统一错误页
+- **文件泄漏检测**：内置 153,737 条敏感文件候选（.git/.svn/.env/配置/备份/数据库/密钥），支持自定义类型与响应签名，并通过软 404 基线降低误报
+- **路径发现**：内置 3,378,432 条站内路径，按 `directory / route / file` 分类，识别 200/3xx/401/403 并过滤统一错误页
 - **nuclei POC 检测**：内置检测模板 + 支持官方 nuclei YAML 模板目录 + 一键下载官方模板库
 
 ### 桌面端 UI
 - 任务首页（进度条、搜索、添加任务对话框、删除任务）
-- 任务详情页（网站截图卡片 / IP 存活 / 端口 / 敏感信息泄露 / 目录扫描结果）
+- 任务详情页（网站截图卡片 / IP 存活 / 端口 / 敏感信息泄露 / 路径发现结果）
 - 跨资产模糊搜索（域名 / IP / 标题 / URL / 指纹 / 泄露路径 / 目录路径）
 - CSV / JSON / XLSX 多格式导出（支持按子域名、存活 IP、端口、站点、泄漏和目录结果筛选）、全局配置管理
 
@@ -71,8 +71,9 @@ core/              纯 Go 引擎（GUI 无关，可独立运行 + 单测）
   fingerprint.go   Web 指纹（Host/SNI + 标题 + CMS 规则）
   screenshot.go    chromedp 截图 + macOS 屏幕权限检查
   leak.go          文件泄漏检测（内置 + 自定义字典）
-  directory.go     目录扫描（嵌入式内置字典 + 自定义字典）
-  dicts/directories.txt  去重合并后的内置目录字典
+  directory.go     路径发现（流式解压内置字典 + 自定义字典）
+  dicts/paths.tsv.gz  337 万条分类后的压缩路径字典
+  dicts/leaks.tsv.gz  15 万条压缩敏感文件字典
   pathscan.go      同源路径探测、并发控制与软 404 过滤
   nuclei.go        nuclei POC（内置 + YAML 模板 + 官方库下载）
   pipeline.go      编排完整侦察闭环
@@ -135,10 +136,10 @@ scan:
   masscan_path: ""          # masscan 路径，空则自动探测（含 Homebrew 常见目录）
 
 file_leak:
-  dict_path: ""             # 文件泄漏自定义字典，空则用内置 30+ 路径
+  dict_path: ""             # 文件泄漏自定义字典，空则用内置敏感文件字典
 
 directory:
-  dict_path: ""             # 目录扫描字典，空则用内置常见目录
+  dict_path: ""             # 路径发现字典；配置键为兼容旧版保留 directory 名称
 
 nuclei:
   templates_dir: ""         # 自定义 nuclei 模板目录（.yaml），空则用内置
@@ -157,21 +158,27 @@ proxy:
 api_keys: {}                # 第三方数据源 Token
 ```
 
-**文件泄漏字典格式**（每行 `路径 [类型]`，`#` 为注释，类型可省略自动推断）：
+**文件泄漏字典格式**（每行 `路径 [类型] [响应签名]`，后两列可省略）：
 ```
 # 自定义泄漏字典
-/.git/config git
+/.git/config git [core]
 /.env
 /backup.zip backup
 ```
 
-**目录扫描字典格式**（一行一个站内路径，`#` 为注释；不允许外部 URL、查询参数和控制字符）：
+**路径发现字典格式**（每行 `路径 [directory|route|file]`，类型省略时按 `route` 处理）：
 ```
-# 自定义目录字典
-/admin
-/api/v1
-uploads
+# 自定义路径字典
+/admin directory
+/api/v1 route
+/assets/app.js file
 ```
+
+内置字典合并自 [enh123/DirectoryFuzz](https://github.com/enh123/DirectoryFuzz) 的全部 26 个 TXT 字典（快照 `10941567fc72be4ab93831221eca79ac38fcc154`）、[maurosoria/dirsearch](https://github.com/maurosoria/dirsearch) v0.5.0 的全部 34 个 categories TXT 字典（快照 `6d685189ed7f3871ab02ca2ce9c3d326fa457b27`），以及 EasyScan 原有条目。dirsearch 的 `%EXT%` 模板按其默认值 `php,asp,aspx,jsp,html,htm` 展开。合并结果经过稳定排序、去重和分类后直接压缩；扫描阶段流式解压，不在启动时展开 337 万条记录。
+
+`paths.tsv.gz` 为 17 MiB，`leaks.tsv.gz` 为 693 KiB，均低于 GitHub 单文件 50 MiB 的目标，因此无需 Git LFS。完整内置扫描请求量很大，可通过 `directory.dict_path` 或 `-dir-dict` 指定精简字典。路径类型来自字典特征推断，用于结果筛选，不代表服务端一定以文件系统目录实现该 URL。
+
+由于压缩字典包含 dirsearch 派生条目，[`core/dicts/paths.tsv.gz`](core/dicts/paths.tsv.gz) 与 [`core/dicts/leaks.tsv.gz`](core/dicts/leaks.tsv.gz) 按 dirsearch 的 `GPL-2.0-only` 许可证分发；EasyScan 自有代码仍使用项目根目录中的 MIT 许可证。
 
 ---
 
@@ -183,8 +190,8 @@ uploads
 | 端口 | `test`（6）/ `top100` / `top1000` / `all`（1-65535）/ `custom`（范围语法，如 `1-1000,8080`） |
 | 指纹 | 标题 / Server / 20+ CMS 与中间件特征 |
 | 截图 | chromedp 无头浏览器（默认开启） |
-| 泄漏 | 30+ 敏感路径 + 自定义字典 |
-| 目录 | 常见后台/API/上传目录 + 自定义字典 + 软 404 过滤 |
+| 泄漏 | 敏感文件压缩字典 + 自定义类型/签名 + 软 404 过滤 |
+| 路径 | 目录/路由/文件分类字典 + 自定义字典 + 软 404 过滤 |
 | POC | 内置模板 + 官方 nuclei YAML 模板 |
 
 **提权说明**：ksubdomain 无状态爆破需要 root/管理员权限（原始 socket）。桌面端会自动弹系统授权框——macOS 管理员授权 / Linux PolicyKit / **Windows UAC（ShellExecuteExW runas）**。macOS/Linux 授权后利用 sudo timestamp 缓存，**短时间内重复扫描不重复弹框**（默认 5 分钟，可在 sudoers 的 `timestamp_timeout` 调整）；Windows 已是管理员则直接执行。用户取消授权则自动降级为纯 Go 字典爆破，不影响扫描。

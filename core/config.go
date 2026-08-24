@@ -28,7 +28,7 @@ type ScanOptions struct {
 	Nuclei bool `json:"nuclei"`
 	// FileLeak 是否执行敏感文件/信息泄漏检测。
 	FileLeak bool `json:"file_leak"`
-	// DirectoryScan 是否执行 Web 目录扫描。
+	// DirectoryScan 是否执行 Web 路径发现。字段名为兼容旧版保留。
 	DirectoryScan bool `json:"directory_scan"`
 	// Screenshot 是否对站点首页截图。
 	Screenshot bool `json:"screenshot"`
@@ -42,7 +42,7 @@ type ScanOptions struct {
 	MasscanPath string `json:"masscan_path"`
 	// LeakDictPath 文件泄漏自定义字典文件（空则用内置字典）。
 	LeakDictPath string `json:"leak_dict_path"`
-	// DirectoryDictPath 目录扫描自定义字典文件（空则用内置字典）。
+	// DirectoryDictPath 路径发现自定义字典文件（空则用内置字典）。
 	DirectoryDictPath string `json:"directory_dict_path"`
 	// NucleiTemplatesDir 自定义 nuclei 模板目录（空则用内置模板）。
 	NucleiTemplatesDir string `json:"nuclei_templates_dir"`
@@ -99,7 +99,7 @@ type FileLeakConfig struct {
 	DictPath string `yaml:"dict_path" json:"dict_path"` // 自定义字典文件，空则用内置
 }
 
-// DirectoryConfig 目录扫描配置。
+// DirectoryConfig 路径发现配置。名称为兼容已有配置文件保留。
 type DirectoryConfig struct {
 	DictPath string `yaml:"dict_path" json:"dict_path"` // 一行一个站内路径，空则用内置字典
 }

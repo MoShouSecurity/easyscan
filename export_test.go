@@ -49,7 +49,7 @@ func newExportTestApp(t *testing.T) *App {
 			return store.UpsertLeak(core.Leak{ID: strings.Repeat("5", 32), URL: "https://www.example.com/.env", Path: "/.env", Type: "env", StatusCode: 200, TaskID: exportTestTaskID, CreatedAt: 1_700_000_005})
 		},
 		func() error {
-			return store.UpsertDirectory(core.DirectoryResult{ID: strings.Repeat("6", 32), URL: "https://www.example.com/admin", Path: "/admin", StatusCode: 403, ContentLength: 128, ContentType: "text/html", TaskID: exportTestTaskID, CreatedAt: 1_700_000_006})
+			return store.UpsertDirectory(core.DirectoryResult{ID: strings.Repeat("6", 32), URL: "https://www.example.com/admin", Path: "/admin", Kind: "directory", StatusCode: 403, ContentLength: 128, ContentType: "text/html", TaskID: exportTestTaskID, CreatedAt: 1_700_000_006})
 		},
 	}
 	for _, insert := range assets {
@@ -92,13 +92,13 @@ func TestExportTaskCSVIncludesAllAssetFields(t *testing.T) {
 		t.Fatalf("rows = %d, want header + 6 assets", len(rows))
 	}
 	headers := strings.Join(rows[0], ",")
-	for _, header := range []string{"产品", "版本", "Banner", "置信度", "指纹", "截图路径", "目录路径", "响应长度"} {
+	for _, header := range []string{"产品", "版本", "Banner", "置信度", "指纹", "截图路径", "目录路径", "响应长度", "路径类型"} {
 		if !strings.Contains(headers, header) {
 			t.Errorf("missing header %q", header)
 		}
 	}
 	all := strings.Join(flattenRows(rows), "\n")
-	for _, expected := range []string{"存活IP", "nginx", "1.25.4", "WordPress", "目录", "/admin", "128", "'=1+1", "'=HYPERLINK"} {
+	for _, expected := range []string{"存活IP", "nginx", "1.25.4", "WordPress", "路径", "/admin", "directory", "128", "'=1+1", "'=HYPERLINK"} {
 		if !strings.Contains(all, expected) {
 			t.Errorf("CSV missing %q", expected)
 		}

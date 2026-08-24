@@ -39,11 +39,35 @@ type pathHit struct {
 	contentType   string
 }
 
+// pathProbeSource 按需产生探测项。返回错误表示字典损坏或读取失败。
+type pathProbeSource func(yield func(pathProbe) bool) error
+
 // scanPaths 并发探测一个站点下的路径。请求始终固定到发现阶段确认的 IP，且不跟随重定向。
-func scanPaths(ctx context.Context, site Site, timeout time.Duration, concurrency int, probes []pathProbe, accept func(int) bool) []pathHit {
-	scope, err := newSiteScope(site)
-	if err != nil || len(probes) == 0 {
+func scanPaths(ctx context.Context, site Site, timeout time.Duration, concurrency int, probes []pathProbe, accept func(int) bool) ([]pathHit, error) {
+	if len(probes) == 0 {
+		return nil, nil
+	}
+	return scanPathSource(ctx, site, timeout, concurrency, func(yield func(pathProbe) bool) error {
+		for _, probe := range probes {
+			if !yield(probe) {
+				return nil
+			}
+		}
 		return nil
+	}, accept)
+}
+
+// scanPathSource 流式消费探测路径，避免大型内置字典被展开为中间切片。
+func scanPathSource(ctx context.Context, site Site, timeout time.Duration, concurrency int, source pathProbeSource, accept func(int) bool) ([]pathHit, error) {
+	scope, err := newSiteScope(site)
+	if err != nil {
+		return nil, fmt.Errorf("初始化站点扫描范围: %w", err)
+	}
+	if source == nil || accept == nil {
+		return nil, fmt.Errorf("路径探测源或状态码过滤器为空")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	client := scope.client(timeout, 0)
 	base := strings.TrimSuffix(scope.baseURL, "/")
@@ -55,12 +79,9 @@ func scanPaths(ctx context.Context, site Site, timeout time.Duration, concurrenc
 	if concurrency > maxPathConcurrency {
 		concurrency = maxPathConcurrency
 	}
-	if concurrency > len(probes) {
-		concurrency = len(probes)
-	}
-
 	jobs := make(chan pathProbe)
 	hits := make(chan pathHit)
+	sourceErr := make(chan error, 1)
 	var workers sync.WaitGroup
 	for i := 0; i < concurrency; i++ {
 		workers.Add(1)
@@ -82,13 +103,14 @@ func scanPaths(ctx context.Context, site Site, timeout time.Duration, concurrenc
 
 	go func() {
 		defer close(jobs)
-		for _, probe := range probes {
+		sourceErr <- source(func(probe pathProbe) bool {
 			select {
 			case jobs <- probe:
+				return true
 			case <-ctx.Done():
-				return
+				return false
 			}
-		}
+		})
 	}()
 	go func() {
 		workers.Wait()
@@ -99,8 +121,14 @@ func scanPaths(ctx context.Context, site Site, timeout time.Duration, concurrenc
 	for hit := range hits {
 		results = append(results, hit)
 	}
+	if err := <-sourceErr; err != nil {
+		return nil, fmt.Errorf("读取路径字典: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	sort.Slice(results, func(i, j int) bool { return results[i].url < results[j].url })
-	return results
+	return results, nil
 }
 
 func probePath(ctx context.Context, client *http.Client, base string, baseline soft404Baseline, probe pathProbe, accept func(int) bool) (pathHit, bool) {
@@ -193,6 +221,9 @@ func normalizeScanPath(raw string) (string, error) {
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.IsAbs() || parsed.Host != "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return "", fmt.Errorf("只允许不含查询参数的站内路径: %q", raw)
+	}
+	if strings.ContainsAny(parsed.Path, "\x00\r\n\t ?#%") {
+		return "", fmt.Errorf("解码后的路径包含不安全字符")
 	}
 	for _, segment := range strings.Split(parsed.Path, "/") {
 		if segment == ".." {

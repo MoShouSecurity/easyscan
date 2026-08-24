@@ -130,7 +130,7 @@
       <div class="check"><input type="checkbox" id="mNoPing" /><span>目标禁 ping（跳过存活确认）</span></div>
       <div class="check"><input type="checkbox" id="mNuclei" /><span>nuclei POC 检测</span></div>
       <div class="check"><input type="checkbox" id="mLeak" /><span>文件泄漏检测</span></div>
-      <div class="check"><input type="checkbox" id="mDirectory" /><span>目录扫描</span></div>
+      <div class="check"><input type="checkbox" id="mDirectory" /><span>路径发现（目录 / 路由 / 文件）</span></div>
       <div class="check"><input type="checkbox" id="mShot" checked /><span>站点截图</span></div>
     </div>
     <div class="actions">
@@ -146,8 +146,8 @@
     <h2>全局配置</h2>
     <label>文件泄漏字典文件（留空用内置字典）</label>
     <input type="text" id="cfgLeakDict" placeholder="/path/to/leak-dict.txt" />
-    <label>目录扫描字典文件（留空用内置字典）</label>
-    <input type="text" id="cfgDirectoryDict" placeholder="/path/to/directory-dict.txt" />
+    <label>路径发现字典文件（留空用内置字典）</label>
+    <input type="text" id="cfgDirectoryDict" placeholder="/path/to/path-dict.txt" />
     <label>nuclei 模板目录（留空用内置模板）</label>
     <div style="display:flex;gap:8px">
       <input type="text" id="cfgTemplatesDir" placeholder="/path/to/nuclei-templates" style="flex:1" />
@@ -223,7 +223,7 @@
       <div class="check"><input type="checkbox" class="export-asset" value="ports" checked /><span>端口与服务</span></div>
       <div class="check"><input type="checkbox" class="export-asset" value="sites" checked /><span>站点与指纹</span></div>
       <div class="check"><input type="checkbox" class="export-asset" value="leaks" checked /><span>敏感信息泄漏</span></div>
-      <div class="check"><input type="checkbox" class="export-asset" value="directories" checked /><span>目录扫描结果</span></div>
+      <div class="check"><input type="checkbox" class="export-asset" value="directories" checked /><span>路径发现结果</span></div>
     </div>
     <div style="margin-top:12px;color:var(--muted);font-size:11px;line-height:1.6">导出文件保存在 Easy Scan 配置目录的 exports 子目录中。</div>
     <div class="actions">
@@ -367,7 +367,7 @@ async function renderDetail(taskID) {
     { key: 'ports', label: '端口', count: ports.length },
     { key: 'subs', label: '子域名', count: subs.length },
     { key: 'leaks', label: '敏感信息泄露', count: leaks.length },
-    { key: 'directories', label: '目录', count: directories.length },
+    { key: 'directories', label: '路径', count: directories.length },
   ];
 
   let html = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
@@ -437,9 +437,9 @@ function renderLeaksHTML(leaks) {
 }
 
 function renderDirectoriesHTML(directories) {
-  if (!directories.length) return '<div class="empty">未发现有效目录</div>';
-  return `<table><thead><tr><th>URL</th><th>路径</th><th>状态码</th><th>响应长度</th><th>内容类型</th></tr></thead><tbody>` +
-    directories.map(d => `<tr><td class="target" data-url="${esc(d.url)}" style="cursor:pointer">${esc(d.url)}</td><td style="color:var(--muted)">${esc(d.path)}</td><td>${d.status_code}</td><td>${d.content_length}</td><td>${esc(d.content_type) || '-'}</td></tr>`).join('') + '</tbody></table>';
+  if (!directories.length) return '<div class="empty">未发现有效路径</div>';
+  return `<table><thead><tr><th>URL</th><th>路径</th><th>类型</th><th>状态码</th><th>响应长度</th><th>内容类型</th></tr></thead><tbody>` +
+    directories.map(d => `<tr><td class="target" data-url="${esc(d.url)}" style="cursor:pointer">${esc(d.url)}</td><td style="color:var(--muted)">${esc(d.path)}</td><td><span class="badge badge-dim">${esc(d.kind || 'route')}</span></td><td>${d.status_code}</td><td>${d.content_length}</td><td>${esc(d.content_type) || '-'}</td></tr>`).join('') + '</tbody></table>';
 }
 
 function switchDetailTab(key) {

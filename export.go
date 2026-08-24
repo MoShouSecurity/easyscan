@@ -179,7 +179,7 @@ var csvHeaders = []string{
 	"资产类型", "ID", "任务ID", "根域名", "子域名", "IP", "端口", "协议", "服务", "产品",
 	"版本", "Banner", "标题", "置信度", "URL", "状态码", "Server", "指纹", "截图路径",
 	"泄漏路径", "泄漏类型", "来源", "创建时间",
-	"目录路径", "响应长度", "内容类型",
+	"目录路径", "响应长度", "内容类型", "路径类型",
 }
 
 func renderCSV(data exportData) ([]byte, error) {
@@ -245,8 +245,8 @@ func renderCSV(data exportData) ([]byte, error) {
 	}
 	if data.Directories != nil {
 		for _, item := range *data.Directories {
-			row := blankCSVRow("目录", item.ID, item.TaskID, item.CreatedAt)
-			row[14], row[15], row[23], row[24], row[25] = item.URL, strconv.Itoa(item.StatusCode), item.Path, strconv.FormatInt(item.ContentLength, 10), item.ContentType
+			row := blankCSVRow("路径", item.ID, item.TaskID, item.CreatedAt)
+			row[14], row[15], row[23], row[24], row[25], row[26] = item.URL, strconv.Itoa(item.StatusCode), item.Path, strconv.FormatInt(item.ContentLength, 10), item.ContentType, item.Kind
 			if err := write(row); err != nil {
 				return nil, fmt.Errorf("生成 CSV: %w", err)
 			}
@@ -361,9 +361,9 @@ func exportSheets(data exportData) []workbookSheet {
 		sheets = append(sheets, s)
 	}
 	if data.Directories != nil {
-		s := workbookSheet{name: "目录", headers: []string{"ID", "任务ID", "URL", "路径", "状态码", "响应长度", "内容类型", "创建时间"}}
+		s := workbookSheet{name: "路径发现", headers: []string{"ID", "任务ID", "URL", "路径", "类型", "状态码", "响应长度", "内容类型", "创建时间"}}
 		for _, v := range *data.Directories {
-			s.rows = append(s.rows, []interface{}{v.ID, v.TaskID, v.URL, v.Path, v.StatusCode, v.ContentLength, v.ContentType, formatTimestamp(v.CreatedAt)})
+			s.rows = append(s.rows, []interface{}{v.ID, v.TaskID, v.URL, v.Path, v.Kind, v.StatusCode, v.ContentLength, v.ContentType, formatTimestamp(v.CreatedAt)})
 		}
 		sheets = append(sheets, s)
 	}

@@ -2,7 +2,10 @@ package core
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
+	_ "embed"
 	"fmt"
 	"net/http"
 	"os"
@@ -11,51 +14,19 @@ import (
 )
 
 // leakRule 敏感文件/信息泄漏探测规则。
-// Sig 为响应体命中签名（小写匹配），空则仅需状态码 200。
+// Sig 为响应体命中签名（不区分大小写），空则依靠状态码和软 404 基线判断。
 type leakRule struct {
 	Path string
 	Type string
 	Sig  string
 }
 
-// leakRules 内置文件泄漏字典。
-var leakRules = []leakRule{
-	{"/.git/config", "git", "[core]"},
-	{"/.git/HEAD", "git", "ref:"},
-	{"/.gitignore", "git", ""},
-	{"/.svn/entries", "svn", "dir"},
-	{"/.svn/wc.db", "svn", ""},
-	{"/.env", "env", ""},
-	{"/.env.local", "env", ""},
-	{"/.DS_Store", "ds_store", ""},
-	{"/.idea/workspace.xml", "idea", "project"},
-	{"/.vscode/settings.json", "vscode", ""},
-	{"/.htaccess", "htaccess", ""},
-	{"/.htpasswd", "htpasswd", ""},
-	{"/WEB-INF/web.xml", "java", "web-app"},
-	{"/WEB-INF/classes/application.properties", "java", "="},
-	{"/phpinfo.php", "phpinfo", "php version"},
-	{"/info.php", "phpinfo", "php version"},
-	{"/composer.json", "composer", "require"},
-	{"/package.json", "node", "\"name\""},
-	{"/package-lock.json", "node", "\"lockfileVersion\""},
-	{"/docker-compose.yml", "docker", "services:"},
-	{"/Dockerfile", "docker", "FROM"},
-	{"/backup.zip", "backup", ""},
-	{"/backup.tar.gz", "backup", ""},
-	{"/backup.sql", "backup", ""},
-	{"/www.zip", "backup", ""},
-	{"/wwwroot.zip", "backup", ""},
-	{"/db.sql", "backup", ""},
-	{"/database.sql", "backup", ""},
-	{"/config.php.bak", "backup", ""},
-	{"/web.config", "iis", "configuration"},
-	{"/robots.txt", "robots", ""},
-	{"/crossdomain.xml", "crossdomain", "cross-domain-policy"},
-	{"/sitemap.xml", "sitemap", "urlset"},
-}
+//go:embed dicts/leaks.tsv.gz
+var builtinLeakDictionary []byte
 
-// loadLeakDict 从字典文件加载泄漏规则。格式：每行 `路径 [类型]`，# 开头为注释，空行忽略。
+const builtinLeakRuleCount = 153737
+
+// loadLeakDict 从字典文件加载泄漏规则。格式：`路径 [类型] [响应签名]`。
 func loadLeakDict(path string) ([]leakRule, error) {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -82,9 +53,6 @@ func loadLeakDict(path string) ([]leakRule, error) {
 			continue
 		}
 		fields := strings.Fields(line)
-		if len(fields) == 0 {
-			continue
-		}
 		normalized, err := normalizeScanPath(fields[0])
 		if err != nil {
 			return nil, fmt.Errorf("字典第 %d 行: %w", lineNumber, err)
@@ -93,11 +61,15 @@ func loadLeakDict(path string) ([]leakRule, error) {
 			continue
 		}
 		seen[normalized] = true
-		rule := leakRule{Path: normalized}
+		rule := leakRule{Path: normalized, Type: inferLeakType(normalized)}
 		if len(fields) >= 2 {
-			rule.Type = fields[1]
-		} else {
-			rule.Type = inferLeakType(normalized)
+			rule.Type = strings.ToLower(fields[1])
+		}
+		if len(fields) >= 3 {
+			rule.Sig = strings.Join(fields[2:], " ")
+		}
+		if rule.Type == "" || len(rule.Type) > 64 || len(rule.Sig) > 256 {
+			return nil, fmt.Errorf("字典第 %d 行: 类型或响应签名无效", lineNumber)
 		}
 		rules = append(rules, rule)
 		if len(rules) > maxPathDictionaryRows {
@@ -113,43 +85,42 @@ func loadLeakDict(path string) ([]leakRule, error) {
 	return rules, nil
 }
 
-// inferLeakType 依据路径关键字自动推断泄露类型。
+// inferLeakType 依据路径特征推断泄漏类型，不把普通 PHP 文件归类为 phpinfo。
 func inferLeakType(path string) string {
 	p := strings.ToLower(path)
 	switch {
-	case strings.Contains(p, ".git"):
+	case strings.Contains(p, "/.git/") || strings.HasSuffix(p, "/.gitignore"):
 		return "git"
-	case strings.Contains(p, ".svn"):
+	case strings.Contains(p, "/.svn/"):
 		return "svn"
-	case strings.Contains(p, ".env"):
+	case strings.Contains(p, "/.hg/"):
+		return "hg"
+	case strings.Contains(p, "/.env"):
 		return "env"
-	case strings.Contains(p, "backup"), strings.HasSuffix(p, ".zip"), strings.HasSuffix(p, ".tar"),
-		strings.HasSuffix(p, ".gz"), strings.HasSuffix(p, ".sql"), strings.HasSuffix(p, ".bak"):
-		return "backup"
-	case strings.Contains(p, "phpinfo"), strings.HasSuffix(p, ".php"):
+	case strings.Contains(p, "phpinfo") || strings.HasSuffix(p, "/info.php"):
 		return "phpinfo"
-	case strings.Contains(p, "actuator"):
-		return "spring"
-	case strings.Contains(p, "swagger"), strings.Contains(p, "api-docs"):
-		return "swagger"
+	case strings.Contains(p, "credential") || strings.Contains(p, "passwd") || strings.Contains(p, "password") || strings.Contains(p, "secret"):
+		return "credential"
+	case strings.Contains(p, "backup") || strings.HasSuffix(p, ".zip") || strings.HasSuffix(p, ".tar") ||
+		strings.HasSuffix(p, ".gz") || strings.HasSuffix(p, ".bak"):
+		return "backup"
+	case strings.HasSuffix(p, ".sql") || strings.HasSuffix(p, ".db") || strings.HasSuffix(p, ".sqlite"):
+		return "database"
+	case strings.Contains(p, "config") || strings.HasSuffix(p, ".yml") || strings.HasSuffix(p, ".yaml") || strings.HasSuffix(p, ".properties"):
+		return "config"
 	default:
 		return "misc"
 	}
 }
 
-// detectLeaks 对一个站点探测敏感文件/信息泄漏，返回命中的泄漏记录。
-func detectLeaks(ctx context.Context, site Site, taskID string, timeout time.Duration, concurrency int, rules []leakRule) []Leak {
-	probes := make([]pathProbe, 0, len(rules))
-	for _, r := range rules {
-		path, err := normalizeScanPath(r.Path)
-		if err != nil {
-			continue
-		}
-		probes = append(probes, pathProbe{path: path, kind: r.Type, signature: r.Sig})
-	}
-	hits := scanPaths(ctx, site, timeout, concurrency, probes, func(status int) bool {
+// detectLeaks 对一个站点流式探测敏感文件，rules 为 nil 时使用内置压缩字典。
+func detectLeaks(ctx context.Context, site Site, taskID string, timeout time.Duration, concurrency int, rules []leakRule) ([]Leak, error) {
+	hits, err := scanPathSource(ctx, site, timeout, concurrency, leakProbeSource(rules), func(status int) bool {
 		return status == http.StatusOK
 	})
+	if err != nil {
+		return nil, err
+	}
 	out := make([]Leak, 0, len(hits))
 	for _, hit := range hits {
 		if hit.contentLength == 0 {
@@ -165,5 +136,58 @@ func detectLeaks(ctx context.Context, site Site, taskID string, timeout time.Dur
 			CreatedAt:  nowUnix(),
 		})
 	}
-	return out
+	return out, nil
+}
+
+func leakProbeSource(rules []leakRule) pathProbeSource {
+	return func(yield func(pathProbe) bool) error {
+		if rules != nil {
+			for _, rule := range rules {
+				normalized, err := normalizeScanPath(rule.Path)
+				if err != nil {
+					return err
+				}
+				if !yield(pathProbe{path: normalized, kind: rule.Type, signature: rule.Sig}) {
+					return nil
+				}
+			}
+			return nil
+		}
+		return forEachBuiltinLeakRule(func(rule leakRule) bool {
+			return yield(pathProbe{path: rule.Path, kind: rule.Type, signature: rule.Sig})
+		})
+	}
+}
+
+func forEachBuiltinLeakRule(yield func(leakRule) bool) error {
+	reader, err := gzip.NewReader(bytes.NewReader(builtinLeakDictionary))
+	if err != nil {
+		return fmt.Errorf("打开内置泄漏字典: %w", err)
+	}
+	defer reader.Close()
+
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 64<<10), maxPathDictionarySize)
+	count := 0
+	for scanner.Scan() {
+		fields := strings.SplitN(scanner.Text(), "\t", 3)
+		if len(fields) != 3 || fields[1] == "" {
+			return fmt.Errorf("内置泄漏字典第 %d 行格式无效", count+1)
+		}
+		normalized, err := normalizeScanPath(fields[0])
+		if err != nil || normalized != fields[0] {
+			return fmt.Errorf("内置泄漏字典第 %d 行路径无效: %q", count+1, fields[0])
+		}
+		count++
+		if !yield(leakRule{Path: normalized, Type: fields[1], Sig: fields[2]}) {
+			return nil
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if count != builtinLeakRuleCount {
+		return fmt.Errorf("内置泄漏字典条目数为 %d，期望 %d", count, builtinLeakRuleCount)
+	}
+	return nil
 }

@@ -122,12 +122,13 @@ type Leak struct {
 	CreatedAt  int64  `json:"created_at"`
 }
 
-// DirectoryResult 是目录扫描发现的可访问或受保护路径。
+// DirectoryResult 是路径发现模块找到的可访问或受保护路径。名称为兼容现有 API 保留。
 type DirectoryResult struct {
 	ID            string `json:"id"`
 	TaskID        string `json:"task_id"`
 	URL           string `json:"url"`
 	Path          string `json:"path"`
+	Kind          string `json:"kind"` // directory / route / file（字典预测类型）
 	StatusCode    int    `json:"status_code"`
 	ContentLength int64  `json:"content_length"`
 	ContentType   string `json:"content_type"`

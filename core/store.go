@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS directories (
 	task_id TEXT DEFAULT '',
 	url TEXT NOT NULL,
 	path TEXT DEFAULT '',
+	kind TEXT DEFAULT 'route',
 	status_code INTEGER DEFAULT 0,
 	content_length INTEGER DEFAULT 0,
 	content_type TEXT DEFAULT '',
@@ -164,6 +165,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 		`ALTER TABLE ports ADD COLUMN confidence INTEGER DEFAULT 0`,
 		`ALTER TABLE sites ADD COLUMN task_id TEXT DEFAULT ''`,
 		`ALTER TABLE sites ADD COLUMN screenshot TEXT DEFAULT ''`,
+		`ALTER TABLE directories ADD COLUMN kind TEXT DEFAULT 'route'`,
 		`ALTER TABLE tasks ADD COLUMN stage TEXT DEFAULT ''`,
 	} {
 		if err := s.ensureColumn(statement); err != nil {
@@ -444,10 +446,13 @@ func (s *Store) UpsertLeak(leak Leak) error {
 func (s *Store) UpsertDirectory(result DirectoryResult) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !validPathKinds[result.Kind] {
+		result.Kind = "route"
+	}
 	_, err := s.db.Exec(
-		`INSERT INTO directories(id, task_id, url, path, status_code, content_length, content_type, created_at) VALUES(?,?,?,?,?,?,?,?)
-		 ON CONFLICT(task_id, url) DO UPDATE SET path=excluded.path, status_code=excluded.status_code, content_length=excluded.content_length, content_type=excluded.content_type`,
-		result.ID, result.TaskID, result.URL, result.Path, result.StatusCode, result.ContentLength, result.ContentType, result.CreatedAt)
+		`INSERT INTO directories(id, task_id, url, path, kind, status_code, content_length, content_type, created_at) VALUES(?,?,?,?,?,?,?,?,?)
+		 ON CONFLICT(task_id, url) DO UPDATE SET path=excluded.path, kind=excluded.kind, status_code=excluded.status_code, content_length=excluded.content_length, content_type=excluded.content_type`,
+		result.ID, result.TaskID, result.URL, result.Path, result.Kind, result.StatusCode, result.ContentLength, result.ContentType, result.CreatedAt)
 	return err
 }
 
@@ -812,7 +817,7 @@ func (s *Store) ListDirectoriesByTask(taskID string, limit int) ([]DirectoryResu
 	if limit == 0 {
 		limit = 5000
 	}
-	rows, err := s.db.Query(`SELECT id, task_id, url, path, status_code, content_length, content_type, created_at FROM directories WHERE task_id=? ORDER BY url LIMIT ?`, taskID, limit)
+	rows, err := s.db.Query(`SELECT id, task_id, url, path, kind, status_code, content_length, content_type, created_at FROM directories WHERE task_id=? ORDER BY url LIMIT ?`, taskID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -820,7 +825,7 @@ func (s *Store) ListDirectoriesByTask(taskID string, limit int) ([]DirectoryResu
 	results := make([]DirectoryResult, 0)
 	for rows.Next() {
 		var result DirectoryResult
-		if err := rows.Scan(&result.ID, &result.TaskID, &result.URL, &result.Path, &result.StatusCode, &result.ContentLength, &result.ContentType, &result.CreatedAt); err != nil {
+		if err := rows.Scan(&result.ID, &result.TaskID, &result.URL, &result.Path, &result.Kind, &result.StatusCode, &result.ContentLength, &result.ContentType, &result.CreatedAt); err != nil {
 			return nil, err
 		}
 		results = append(results, result)

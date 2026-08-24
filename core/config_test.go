@@ -78,7 +78,7 @@ func TestConfigValidationAndPermissions(t *testing.T) {
 func TestLoadLeakDict(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "dict.txt")
-	content := "# 自定义泄漏字典\n/.git/config git\n/.env\n/backup.zip backup\n"
+	content := "# 自定义泄漏字典\n/.git/config git [core]\n/.env\n/backup.zip backup\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +91,12 @@ func TestLoadLeakDict(t *testing.T) {
 	}
 	if rules[0].Type != "git" || rules[1].Type != "env" || rules[2].Type != "backup" {
 		t.Fatalf("rules = %+v", rules)
+	}
+	if rules[0].Sig != "[core]" {
+		t.Fatalf("signature = %q; want [core]", rules[0].Sig)
+	}
+	if got := inferLeakType("/index.php"); got == "phpinfo" {
+		t.Fatalf("ordinary PHP file inferred as phpinfo: %q", got)
 	}
 }
 

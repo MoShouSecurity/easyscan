@@ -122,6 +122,18 @@ type Leak struct {
 	CreatedAt  int64  `json:"created_at"`
 }
 
+// DirectoryResult 是目录扫描发现的可访问或受保护路径。
+type DirectoryResult struct {
+	ID            string `json:"id"`
+	TaskID        string `json:"task_id"`
+	URL           string `json:"url"`
+	Path          string `json:"path"`
+	StatusCode    int    `json:"status_code"`
+	ContentLength int64  `json:"content_length"`
+	ContentType   string `json:"content_type"`
+	CreatedAt     int64  `json:"created_at"`
+}
+
 // Task 侦察任务记录。
 type Task struct {
 	ID         string     `json:"id"`

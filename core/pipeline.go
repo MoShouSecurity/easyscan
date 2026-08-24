@@ -524,7 +524,7 @@ func mapToSites(siteMap map[string]Site) []Site {
 	return sites
 }
 
-// postProcess 执行文件泄漏 / POC / 截图等附加模块。base 为起始进度（百分比）。
+// postProcess 执行文件泄漏、目录扫描、POC 和截图等附加模块。base 为起始进度（百分比）。
 func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, report ProgressFunc, base int) error {
 	if len(sites) == 0 {
 		return nil
@@ -548,7 +548,7 @@ func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, r
 			}
 		}
 		for _, site := range sites {
-			for _, leak := range detectLeaks(ctx, site, taskID, e.opts.Timeout, rules) {
+			for _, leak := range detectLeaks(ctx, site, taskID, e.opts.Timeout, e.opts.Concurrency, rules) {
 				if err := e.store.UpsertLeak(leak); err != nil {
 					return fmt.Errorf("保存泄漏结果 %s: %w", leak.URL, err)
 				}
@@ -556,6 +556,30 @@ func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, r
 		}
 		pct += 3
 		report("文件泄漏检测", "完成", pct)
+	}
+	if e.opts.DirectoryScan {
+		report("目录扫描", fmt.Sprintf("探测 %d 个站点", len(sites)), pct)
+		paths := directoryPaths
+		if e.opts.DirectoryDictPath != "" {
+			if custom, err := loadDirectoryDict(e.opts.DirectoryDictPath); err == nil {
+				paths = custom
+				report("目录扫描", fmt.Sprintf("加载自定义字典 %d 条", len(custom)), pct)
+			} else {
+				report("目录扫描", "加载自定义字典失败，改用内置字典: "+err.Error(), pct)
+			}
+		}
+		for _, site := range sites {
+			for _, result := range detectDirectories(ctx, site, taskID, e.opts.Timeout, e.opts.Concurrency, paths) {
+				if err := e.store.UpsertDirectory(result); err != nil {
+					return fmt.Errorf("保存目录结果 %s: %w", result.URL, err)
+				}
+			}
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		}
+		pct += 3
+		report("目录扫描", "完成", pct)
 	}
 	if e.opts.Nuclei {
 		report("POC 检测", fmt.Sprintf("检测 %d 个站点", len(sites)), pct)

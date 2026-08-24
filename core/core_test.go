@@ -236,6 +236,9 @@ func TestTaskFilterAndSearch(t *testing.T) {
 	if err := s.UpsertLeak(Leak{ID: newID(), TaskID: taskA, URL: "http://api.example.com/.git/config", Path: "/.git/config", Type: "git", StatusCode: 200, CreatedAt: nowUnix()}); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.UpsertDirectory(DirectoryResult{ID: newID(), TaskID: taskA, URL: "http://api.example.com/admin", Path: "/admin", StatusCode: 403, ContentLength: 13, ContentType: "text/html", CreatedAt: nowUnix()}); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.UpsertIP(IP{ID: newID(), IP: "10.0.0.1", TaskID: taskA, CreatedAt: nowUnix()}); err != nil {
 		t.Fatal(err)
 	}
@@ -252,6 +255,10 @@ func TestTaskFilterAndSearch(t *testing.T) {
 	if len(leaksA) != 1 || leaksA[0].Type != "git" {
 		t.Fatalf("ListLeaksByTask(taskA) = %+v", leaksA)
 	}
+	directoriesA, _ := s.ListDirectoriesByTask(taskA, 0)
+	if len(directoriesA) != 1 || directoriesA[0].Path != "/admin" || directoriesA[0].ContentLength != 13 {
+		t.Fatalf("ListDirectoriesByTask(taskA) = %+v", directoriesA)
+	}
 
 	// 搜索命中站点标题。
 	res, _ := s.Search("API Admin", 10)
@@ -264,6 +271,16 @@ func TestTaskFilterAndSearch(t *testing.T) {
 	if !found {
 		t.Fatalf("Search 未命中站点: %+v", res)
 	}
+	res, _ = s.Search("/admin", 10)
+	found = false
+	for _, r := range res {
+		if r.Type == "directory" && r.Value == "http://api.example.com/admin" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Search 未命中目录: %+v", res)
+	}
 
 	// 删除任务，验证关联资产一并删除。
 	if err := s.DeleteTask(taskA); err != nil {
@@ -274,6 +291,9 @@ func TestTaskFilterAndSearch(t *testing.T) {
 	}
 	if leaks, _ := s.ListLeaksByTask(taskA, 0); len(leaks) != 0 {
 		t.Fatalf("删除后泄漏仍存在: %+v", leaks)
+	}
+	if directories, _ := s.ListDirectoriesByTask(taskA, 0); len(directories) != 0 {
+		t.Fatalf("删除后目录仍存在: %+v", directories)
 	}
 	if ips, _ := s.ListIPsByTask(taskA, 0); len(ips) != 0 {
 		t.Fatalf("删除后存活 IP 仍存在: %+v", ips)

@@ -87,7 +87,7 @@ func TestDetectLeaksRejectsSoft404(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	leaks := detectLeaks(context.Background(), Site{URL: srv.URL}, "task", 2*time.Second, leakRules)
+	leaks := detectLeaks(context.Background(), Site{URL: srv.URL}, "task", 2*time.Second, 10, leakRules)
 	if len(leaks) != 0 {
 		t.Fatalf("软 404 不应产生泄漏结果: %+v", leaks)
 	}

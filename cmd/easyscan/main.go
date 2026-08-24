@@ -15,17 +15,21 @@ import (
 
 func main() {
 	var (
-		target  = flag.String("target", "", "目标域名或 IP/网段，如 example.com 或 1.2.3.0/24")
-		typ     = flag.String("type", "domain", "任务类型: domain / ip")
-		ports   = flag.String("ports", "top100", "端口模式: test / top100 / top1000 / all")
-		db      = flag.String("db", "easyscan.db", "SQLite 数据库路径")
-		noBrute = flag.Bool("no-brute", false, "关闭子域名字典爆破")
-		noShot  = flag.Bool("no-shot", false, "关闭站点截图")
-		shotDir = flag.String("shot-dir", "screenshots", "截图保存目录")
-		bench   = flag.Bool("bench", false, "端口扫描基准对比（nmap vs 纯 Go），不写库")
-		jsonOut = flag.Bool("json", false, "benchmark 输出 JSON（供脚本消费）")
-		fofaKey = flag.String("fofa-key", "", "FOFA API key（子域名收集，留空跳过）")
-		proxy   = flag.String("proxy", "", "HTTP 代理（FOFA/subfinder 出站请求），如 http://127.0.0.1:7890")
+		target   = flag.String("target", "", "目标域名或 IP/网段，如 example.com 或 1.2.3.0/24")
+		typ      = flag.String("type", "domain", "任务类型: domain / ip")
+		ports    = flag.String("ports", "top100", "端口模式: test / top100 / top1000 / all")
+		db       = flag.String("db", "easyscan.db", "SQLite 数据库路径")
+		noBrute  = flag.Bool("no-brute", false, "关闭子域名字典爆破")
+		noShot   = flag.Bool("no-shot", false, "关闭站点截图")
+		shotDir  = flag.String("shot-dir", "screenshots", "截图保存目录")
+		bench    = flag.Bool("bench", false, "端口扫描基准对比（nmap vs 纯 Go），不写库")
+		jsonOut  = flag.Bool("json", false, "benchmark 输出 JSON（供脚本消费）")
+		fofaKey  = flag.String("fofa-key", "", "FOFA API key（子域名收集，留空跳过）")
+		proxy    = flag.String("proxy", "", "HTTP 代理（FOFA/subfinder 出站请求），如 http://127.0.0.1:7890")
+		fileLeak = flag.Bool("file-leak", false, "开启文件泄漏扫描")
+		leakDict = flag.String("leak-dict", "", "文件泄漏字典文件（每行：路径 [类型]）")
+		dirScan  = flag.Bool("dir-scan", false, "开启 Web 目录扫描")
+		dirDict  = flag.String("dir-dict", "", "目录扫描字典文件（一行一个路径）")
 	)
 	flag.Parse()
 
@@ -70,6 +74,10 @@ func main() {
 	opts.ScreenshotDir = *shotDir
 	opts.FofaKey = *fofaKey
 	opts.ProxyURL = *proxy
+	opts.FileLeak = *fileLeak
+	opts.LeakDictPath = *leakDict
+	opts.DirectoryScan = *dirScan
+	opts.DirectoryDictPath = *dirDict
 
 	engine := core.NewEngine(store, opts)
 	ctx := context.Background()
@@ -166,6 +174,22 @@ func printSummary(store *core.Store, target string, typ core.TaskType) {
 				shot = " (截图: " + s.Screenshot + ")"
 			}
 			fmt.Printf("  %-40s [%s] %s%s\n", s.URL, s.Fingerprint, s.Title, shot)
+		}
+	}
+
+	leaks, _ := store.ListLeaksByTask("", 100)
+	if len(leaks) > 0 {
+		fmt.Printf("\n文件泄漏: %d\n", len(leaks))
+		for _, leak := range leaks {
+			fmt.Printf("  %-6d %-12s %s\n", leak.StatusCode, leak.Type, leak.URL)
+		}
+	}
+
+	directories, _ := store.ListDirectoriesByTask("", 200)
+	if len(directories) > 0 {
+		fmt.Printf("\n目录发现: %d\n", len(directories))
+		for _, directory := range directories {
+			fmt.Printf("  %-6d %-8d %s\n", directory.StatusCode, directory.ContentLength, directory.URL)
 		}
 	}
 }

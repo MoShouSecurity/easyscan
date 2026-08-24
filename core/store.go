@@ -126,6 +126,18 @@ CREATE TABLE IF NOT EXISTS leaks (
 	UNIQUE(task_id, url)
 );
 CREATE INDEX IF NOT EXISTS idx_leaks_task ON leaks(task_id);
+CREATE TABLE IF NOT EXISTS directories (
+	id TEXT PRIMARY KEY,
+	task_id TEXT DEFAULT '',
+	url TEXT NOT NULL,
+	path TEXT DEFAULT '',
+	status_code INTEGER DEFAULT 0,
+	content_length INTEGER DEFAULT 0,
+	content_type TEXT DEFAULT '',
+	created_at INTEGER NOT NULL,
+	UNIQUE(task_id, url)
+);
+CREATE INDEX IF NOT EXISTS idx_directories_task ON directories(task_id);
 CREATE TABLE IF NOT EXISTS tasks (
 	id TEXT PRIMARY KEY,
 	target TEXT NOT NULL,
@@ -429,6 +441,16 @@ func (s *Store) UpsertLeak(leak Leak) error {
 	return err
 }
 
+func (s *Store) UpsertDirectory(result DirectoryResult) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(
+		`INSERT INTO directories(id, task_id, url, path, status_code, content_length, content_type, created_at) VALUES(?,?,?,?,?,?,?,?)
+		 ON CONFLICT(task_id, url) DO UPDATE SET path=excluded.path, status_code=excluded.status_code, content_length=excluded.content_length, content_type=excluded.content_type`,
+		result.ID, result.TaskID, result.URL, result.Path, result.StatusCode, result.ContentLength, result.ContentType, result.CreatedAt)
+	return err
+}
+
 // SetSiteScreenshot 更新站点截图路径。
 func (s *Store) SetSiteScreenshot(taskID, url, path string) error {
 	s.mu.Lock()
@@ -520,8 +542,7 @@ func (s *Store) GetTask(id string) (*Task, error) {
 	return &t, nil
 }
 
-// DeleteTask 删除任务及其全部关联数据：端口/站点/泄漏/存活 IP/子域名
-// （子域名归属最后一个写入的任务，删除该任务即连同其子域名一起删除）。
+// DeleteTask 删除任务及其全部关联数据：端口/站点/泄漏/目录/存活 IP/子域名
 // 根域名（domains）在该域名无任何子域名且无其他任务引用时一并清理。
 func (s *Store) DeleteTask(id string) error {
 	s.mu.Lock()
@@ -537,6 +558,7 @@ func (s *Store) DeleteTask(id string) error {
 		`DELETE FROM ports WHERE task_id=?`,
 		`DELETE FROM sites WHERE task_id=?`,
 		`DELETE FROM leaks WHERE task_id=?`,
+		`DELETE FROM directories WHERE task_id=?`,
 		`DELETE FROM ips WHERE task_id=?`,
 		`DELETE FROM subdomains WHERE task_id=?`,
 	} {
@@ -786,15 +808,35 @@ func (s *Store) ListLeaksByTask(taskID string, limit int) ([]Leak, error) {
 	return out, rows.Err()
 }
 
+func (s *Store) ListDirectoriesByTask(taskID string, limit int) ([]DirectoryResult, error) {
+	if limit == 0 {
+		limit = 5000
+	}
+	rows, err := s.db.Query(`SELECT id, task_id, url, path, status_code, content_length, content_type, created_at FROM directories WHERE task_id=? ORDER BY url LIMIT ?`, taskID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	results := make([]DirectoryResult, 0)
+	for rows.Next() {
+		var result DirectoryResult
+		if err := rows.Scan(&result.ID, &result.TaskID, &result.URL, &result.Path, &result.StatusCode, &result.ContentLength, &result.ContentType, &result.CreatedAt); err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+	return results, rows.Err()
+}
+
 // SearchResult 跨表搜索命中结果。
 type SearchResult struct {
-	Type   string `json:"type"`   // domain / subdomain / ip / port / site / leak
+	Type   string `json:"type"`   // domain / subdomain / ip / port / site / leak / directory
 	Value  string `json:"value"`  // 主显示值
 	Detail string `json:"detail"` // 补充信息
 	TaskID string `json:"task_id"`
 }
 
-// Search 跨资产库模糊搜索域名、子域名、IP、标题、URL、指纹、泄露路径。
+// Search 跨资产库模糊搜索域名、子域名、IP、标题、URL、指纹、泄露路径和目录路径。
 func (s *Store) Search(q string, limit int) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = 200
@@ -815,6 +857,7 @@ func (s *Store) Search(q string, limit int) ([]SearchResult, error) {
 		{`SELECT ip, title, task_id FROM ports WHERE ip LIKE ? OR service LIKE ? OR title LIKE ? LIMIT ?`, "port", func(v []any) (string, string, string) { return v[0].(string), v[1].(string), v[2].(string) }},
 		{`SELECT url, title, task_id FROM sites WHERE url LIKE ? OR title LIKE ? OR fingerprint LIKE ? LIMIT ?`, "site", func(v []any) (string, string, string) { return v[0].(string), v[1].(string), v[2].(string) }},
 		{`SELECT url, path, task_id FROM leaks WHERE url LIKE ? OR path LIKE ? LIMIT ?`, "leak", func(v []any) (string, string, string) { return v[0].(string), v[1].(string), v[2].(string) }},
+		{`SELECT url, path, task_id FROM directories WHERE url LIKE ? OR path LIKE ? LIMIT ?`, "directory", func(v []any) (string, string, string) { return v[0].(string), v[1].(string), v[2].(string) }},
 	}
 
 	for _, qq := range queries {
@@ -828,7 +871,7 @@ func (s *Store) Search(q string, limit int) ([]SearchResult, error) {
 			args = []any{like, like, like, limit}
 		case "site":
 			args = []any{like, like, like, limit}
-		case "leak":
+		case "leak", "directory":
 			args = []any{like, like, limit}
 		}
 		rows, err := s.db.Query(qq.sql, args...)

@@ -101,7 +101,7 @@
   <span class="logo">Easy Scan</span>
   <button class="ghost" id="backBtn" style="display:none" onclick="goHome()">← 返回</button>
   <div class="search-box" id="searchBox">
-    <input id="searchInput" type="text" placeholder="搜索域名 / IP / 标题 / URL / 指纹…" onkeydown="if(event.key==='Enter')doSearch()" />
+    <input id="searchInput" type="text" placeholder="搜索域名 / IP / 标题 / URL / 指纹 / 路径…" onkeydown="if(event.key==='Enter')doSearch()" />
     <button class="ghost" onclick="doSearch()">搜索</button>
   </div>
   <span style="flex:1"></span>
@@ -130,6 +130,7 @@
       <div class="check"><input type="checkbox" id="mNoPing" /><span>目标禁 ping（跳过存活确认）</span></div>
       <div class="check"><input type="checkbox" id="mNuclei" /><span>nuclei POC 检测</span></div>
       <div class="check"><input type="checkbox" id="mLeak" /><span>文件泄漏检测</span></div>
+      <div class="check"><input type="checkbox" id="mDirectory" /><span>目录扫描</span></div>
       <div class="check"><input type="checkbox" id="mShot" checked /><span>站点截图</span></div>
     </div>
     <div class="actions">
@@ -145,6 +146,8 @@
     <h2>全局配置</h2>
     <label>文件泄漏字典文件（留空用内置字典）</label>
     <input type="text" id="cfgLeakDict" placeholder="/path/to/leak-dict.txt" />
+    <label>目录扫描字典文件（留空用内置字典）</label>
+    <input type="text" id="cfgDirectoryDict" placeholder="/path/to/directory-dict.txt" />
     <label>nuclei 模板目录（留空用内置模板）</label>
     <div style="display:flex;gap:8px">
       <input type="text" id="cfgTemplatesDir" placeholder="/path/to/nuclei-templates" style="flex:1" />
@@ -220,6 +223,7 @@
       <div class="check"><input type="checkbox" class="export-asset" value="ports" checked /><span>端口与服务</span></div>
       <div class="check"><input type="checkbox" class="export-asset" value="sites" checked /><span>站点与指纹</span></div>
       <div class="check"><input type="checkbox" class="export-asset" value="leaks" checked /><span>敏感信息泄漏</span></div>
+      <div class="check"><input type="checkbox" class="export-asset" value="directories" checked /><span>目录扫描结果</span></div>
     </div>
     <div style="margin-top:12px;color:var(--muted);font-size:11px;line-height:1.6">导出文件保存在 Easy Scan 配置目录的 exports 子目录中。</div>
     <div class="actions">
@@ -233,7 +237,7 @@
 <div class="modal-mask" id="deleteModal">
   <div class="modal" style="width:380px">
     <h2>删除任务</h2>
-    <p style="color:var(--muted);margin-bottom:8px;line-height:1.6">确定删除该任务及其端口 / 站点 / 泄露记录？<br>子域名将保留（仅解绑）。此操作不可撤销。</p>
+    <p style="color:var(--muted);margin-bottom:8px;line-height:1.6">确定删除该任务及其端口 / 站点 / 泄露 / 目录记录？<br>此操作不可撤销。</p>
     <div class="actions">
       <button class="ghost" onclick="cancelDelete()">取消</button>
       <button class="primary" style="background:linear-gradient(135deg,var(--err),#B93A4C)" onclick="confirmDelete()">确认删除</button>
@@ -329,17 +333,17 @@ async function openDetail(taskID) {
 
 async function renderDetail(taskID) {
   const v = document.getElementById('view');
-  let task, sites, ports, leaks, subs, ips;
+  let task, sites, ports, leaks, directories, subs, ips;
   try {
-    [task, sites, ports, leaks, subs, ips] = await Promise.all([
-      go.GetTask(taskID), go.ListSitesByTask(taskID), go.ListPortsByTask(taskID), go.ListLeaksByTask(taskID), go.ListSubdomainsByTask(taskID), go.ListIPsByTask(taskID)
+    [task, sites, ports, leaks, directories, subs, ips] = await Promise.all([
+      go.GetTask(taskID), go.ListSitesByTask(taskID), go.ListPortsByTask(taskID), go.ListLeaksByTask(taskID), go.ListDirectoriesByTask(taskID), go.ListSubdomainsByTask(taskID), go.ListIPsByTask(taskID)
     ]);
   } catch(e) {
     v.innerHTML = '<div class="empty">加载详情失败: ' + esc(e) + '</div>';
     return;
   }
   if (!task) { v.innerHTML = '<div class="empty">任务不存在或已删除</div>'; return; }
-  sites = sites || []; ports = ports || []; leaks = leaks || []; subs = subs || []; ips = ips || [];
+  sites = sites || []; ports = ports || []; leaks = leaks || []; directories = directories || []; subs = subs || []; ips = ips || [];
 
   // 存活 IP 优先用落盘的 ips，兜底从端口/子域名推导（兼容旧任务）。
   const aliveIPs = ips.length
@@ -354,6 +358,7 @@ async function renderDetail(taskID) {
     ports: renderPortsHTML(ports),
     subs: renderSubsHTML(subs),
     leaks: renderLeaksHTML(leaks),
+    directories: renderDirectoriesHTML(directories),
   };
 
   const tabDefs = [
@@ -362,6 +367,7 @@ async function renderDetail(taskID) {
     { key: 'ports', label: '端口', count: ports.length },
     { key: 'subs', label: '子域名', count: subs.length },
     { key: 'leaks', label: '敏感信息泄露', count: leaks.length },
+    { key: 'directories', label: '目录', count: directories.length },
   ];
 
   let html = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
@@ -428,6 +434,12 @@ function renderLeaksHTML(leaks) {
   if (!leaks.length) return '<div class="empty">未发现敏感信息泄露</div>';
   return `<table><thead><tr><th>URL</th><th>类型</th><th>路径</th><th>状态码</th></tr></thead><tbody>` +
     leaks.map(l => `<tr><td class="target">${esc(l.url)}</td><td><span class="badge" style="background:rgba(238,72,99,.15);color:var(--err)">${esc(l.type)}</span></td><td style="color:var(--muted)">${esc(l.path)}</td><td>${l.status_code}</td></tr>`).join('') + '</tbody></table>';
+}
+
+function renderDirectoriesHTML(directories) {
+  if (!directories.length) return '<div class="empty">未发现有效目录</div>';
+  return `<table><thead><tr><th>URL</th><th>路径</th><th>状态码</th><th>响应长度</th><th>内容类型</th></tr></thead><tbody>` +
+    directories.map(d => `<tr><td class="target" data-url="${esc(d.url)}" style="cursor:pointer">${esc(d.url)}</td><td style="color:var(--muted)">${esc(d.path)}</td><td>${d.status_code}</td><td>${d.content_length}</td><td>${esc(d.content_type) || '-'}</td></tr>`).join('') + '</tbody></table>';
 }
 
 function switchDetailTab(key) {
@@ -527,6 +539,7 @@ async function submitTask() {
       no_ping: document.getElementById('mNoPing').checked,
       nuclei: document.getElementById('mNuclei').checked,
       file_leak: document.getElementById('mLeak').checked,
+      directory_scan: document.getElementById('mDirectory').checked,
       screenshot: document.getElementById('mShot').checked,
     };
     let count = 0;
@@ -553,6 +566,7 @@ async function openConfig() {
   try {
     const cfg = await go.GetConfig();
     document.getElementById('cfgLeakDict').value = (cfg.file_leak && cfg.file_leak.dict_path) || '';
+    document.getElementById('cfgDirectoryDict').value = (cfg.directory && cfg.directory.dict_path) || '';
     document.getElementById('cfgTemplatesDir').value = (cfg.nuclei && cfg.nuclei.templates_dir) || '';
     document.getElementById('cfgNucleiAuto').checked = !!(cfg.nuclei && cfg.nuclei.auto_download);
     document.getElementById('cfgNucleiRepo').value = (cfg.nuclei && cfg.nuclei.templates_repo) || '';
@@ -574,6 +588,7 @@ function closeConfig() { document.getElementById('configModal').classList.remove
 async function saveConfig() {
   const cfg = await go.GetConfig();
   cfg.file_leak = cfg.file_leak || {}; cfg.file_leak.dict_path = document.getElementById('cfgLeakDict').value.trim();
+  cfg.directory = cfg.directory || {}; cfg.directory.dict_path = document.getElementById('cfgDirectoryDict').value.trim();
   cfg.nuclei = cfg.nuclei || {};
   cfg.nuclei.templates_dir = document.getElementById('cfgTemplatesDir').value.trim();
   cfg.nuclei.auto_download = document.getElementById('cfgNucleiAuto').checked;

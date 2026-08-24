@@ -30,7 +30,7 @@ func TestDetectLeaksAndNuclei(t *testing.T) {
 	ctx := context.Background()
 	timeout := 2 * time.Second
 
-	leaks := detectLeaks(ctx, site, "task1", timeout, leakRules)
+	leaks := detectLeaks(ctx, site, "task1", timeout, 10, leakRules)
 	if !hasLeakType(leaks, "git") {
 		t.Fatalf("文件泄漏检测未命中 .git/config: %+v", leaks)
 	}

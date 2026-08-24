@@ -24,14 +24,15 @@ Easy Scan 是一款**跨平台桌面资产侦察工具**——单二进制 + SQL
 - **站点截图**：chromedp 无头浏览器，启动前自动检查 macOS 屏幕录制权限
 
 ### 漏洞检测
-- **文件泄漏检测**：30+ 内置敏感路径（.git/.svn/.env/备份文件/phpinfo/actuator），支持自定义字典文件
+- **文件泄漏检测**：30+ 内置敏感路径（.git/.svn/.env/备份文件/phpinfo/actuator），支持自定义字典，并通过响应签名与软 404 基线降低误报
+- **目录扫描**：内置常见后台/API/上传目录，支持一行一个路径的自定义字典，识别 200/3xx/401/403 并过滤统一错误页
 - **nuclei POC 检测**：内置检测模板 + 支持官方 nuclei YAML 模板目录 + 一键下载官方模板库
 
 ### 桌面端 UI
 - 任务首页（进度条、搜索、添加任务对话框、删除任务）
-- 任务详情页（网站截图卡片 / IP 存活 / 端口 / 敏感信息泄露 四个标签页）
-- 跨资产模糊搜索（域名 / IP / 标题 / URL / 指纹 / 泄露路径）
-- CSV / JSON / XLSX 多格式导出（支持按子域名、存活 IP、端口、站点、泄漏结果筛选）、全局配置管理
+- 任务详情页（网站截图卡片 / IP 存活 / 端口 / 敏感信息泄露 / 目录扫描结果）
+- 跨资产模糊搜索（域名 / IP / 标题 / URL / 指纹 / 泄露路径 / 目录路径）
+- CSV / JSON / XLSX 多格式导出（支持按子域名、存活 IP、端口、站点、泄漏和目录结果筛选）、全局配置管理
 
 ---
 
@@ -57,7 +58,7 @@ app.go             Wails 绑定层（暴露给前端的 API）
 frontend/dist/     桌面 UI（静态 HTML/JS，中国风配色）
 
 core/              纯 Go 引擎（GUI 无关，可独立运行 + 单测）
-  model.go         领域模型（Domain/Subdomain/Port/Site/Leak/Task）
+  model.go         领域模型（Domain/Subdomain/Port/Site/Leak/DirectoryResult/Task）
   store.go         SQLite 存储（WAL + upsert 去重 + 跨表搜索）
   config.go        任务策略 + 全局配置（config.yaml）
   subdomain.go     子域名枚举编排（subfinder + ksubdomain + 纯 Go 兜底）
@@ -70,6 +71,9 @@ core/              纯 Go 引擎（GUI 无关，可独立运行 + 单测）
   fingerprint.go   Web 指纹（Host/SNI + 标题 + CMS 规则）
   screenshot.go    chromedp 截图 + macOS 屏幕权限检查
   leak.go          文件泄漏检测（内置 + 自定义字典）
+  directory.go     目录扫描（嵌入式内置字典 + 自定义字典）
+  dicts/directories.txt  去重合并后的内置目录字典
+  pathscan.go      同源路径探测、并发控制与软 404 过滤
   nuclei.go        nuclei POC（内置 + YAML 模板 + 官方库下载）
   pipeline.go      编排完整侦察闭环
   scheduler.go     进程内任务调度
@@ -105,6 +109,7 @@ wails build -platform windows/amd64        # 交叉编译 Windows x64
 go run ./cmd/easyscan -target example.com -ports top100
 # 参数: -type domain|ip  -ports test|top100|top1000|all
 #       -no-brute 关闭子域名爆破  -no-shot 关闭截图
+#       -file-leak [-leak-dict file]  -dir-scan [-dir-dict file]
 #       -db 指定数据库路径  -shot-dir 截图目录
 ```
 
@@ -132,6 +137,9 @@ scan:
 file_leak:
   dict_path: ""             # 文件泄漏自定义字典，空则用内置 30+ 路径
 
+directory:
+  dict_path: ""             # 目录扫描字典，空则用内置常见目录
+
 nuclei:
   templates_dir: ""         # 自定义 nuclei 模板目录（.yaml），空则用内置
   auto_download: false      # 是否自动下载官方模板库
@@ -157,6 +165,14 @@ api_keys: {}                # 第三方数据源 Token
 /backup.zip backup
 ```
 
+**目录扫描字典格式**（一行一个站内路径，`#` 为注释；不允许外部 URL、查询参数和控制字符）：
+```
+# 自定义目录字典
+/admin
+/api/v1
+uploads
+```
+
 ---
 
 ## 任务策略
@@ -168,6 +184,7 @@ api_keys: {}                # 第三方数据源 Token
 | 指纹 | 标题 / Server / 20+ CMS 与中间件特征 |
 | 截图 | chromedp 无头浏览器（默认开启） |
 | 泄漏 | 30+ 敏感路径 + 自定义字典 |
+| 目录 | 常见后台/API/上传目录 + 自定义字典 + 软 404 过滤 |
 | POC | 内置模板 + 官方 nuclei YAML 模板 |
 
 **提权说明**：ksubdomain 无状态爆破需要 root/管理员权限（原始 socket）。桌面端会自动弹系统授权框——macOS 管理员授权 / Linux PolicyKit / **Windows UAC（ShellExecuteExW runas）**。macOS/Linux 授权后利用 sudo timestamp 缓存，**短时间内重复扫描不重复弹框**（默认 5 分钟，可在 sudoers 的 `timestamp_timeout` 调整）；Windows 已是管理员则直接执行。用户取消授权则自动降级为纯 Go 字典爆破，不影响扫描。

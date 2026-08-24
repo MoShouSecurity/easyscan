@@ -23,5 +23,8 @@ frontend/dist/*.map
 # Claude Code 本地配置
 .claude/
 
+# 本地代码审计报告
+CODE_AUDIT_REPORT.md
+
 # ksubdomain 运行时生成的网卡配置
 ksubdomain.yaml

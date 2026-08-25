@@ -61,6 +61,30 @@ func TestFofaFilterResults(t *testing.T) {
 	}
 }
 
+// TestFofaWebSchemesTLSFirst 防止 FOFA 端口线索绕过统一协议优先级。
+func TestFofaWebSchemesTLSFirst(t *testing.T) {
+	cases := []struct {
+		port int
+		want []string
+	}{
+		{443, []string{"https", "http"}},
+		{8443, []string{"https", "http"}},
+		{80, []string{"http", "https"}},
+		{12345, []string{"http", "https"}},
+	}
+	for _, c := range cases {
+		got := fofaWebSchemes(c.port)
+		if len(got) != len(c.want) {
+			t.Fatalf("fofaWebSchemes(%d) = %v; want %v", c.port, got, c.want)
+		}
+		for i := range c.want {
+			if got[i] != c.want[i] {
+				t.Fatalf("fofaWebSchemes(%d) = %v; want %v", c.port, got, c.want)
+			}
+		}
+	}
+}
+
 // startFofaMock 起一个 FOFA API mock server，返回 handler 与请求计数。
 func startFofaMock(t *testing.T, handler http.HandlerFunc) (*httptest.Server, *int32) {
 	t.Helper()

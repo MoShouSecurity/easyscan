@@ -185,7 +185,7 @@ func probeFofaSites(ctx context.Context, results []fofaResult, store *Store, tas
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			for _, scheme := range []string{"http", "https"} {
+			for _, scheme := range fofaWebSchemes(r.Port) {
 				if ctx.Err() != nil {
 					return
 				}
@@ -201,6 +201,16 @@ func probeFofaSites(ctx context.Context, results []fofaResult, store *Store, tas
 	}
 	wg.Wait()
 	return firstErr
+}
+
+// fofaWebSchemes 返回 FOFA 端口线索的协议探测顺序。常见 TLS 端口必须优先 HTTPS，
+// 避免同时接受明文 HTTP 的 443 端口先被记录为 http://host:443；未知端口仍保留
+// HTTP/HTTPS 双探测，以免遗漏部署在非标准端口上的 Web 服务。
+func fofaWebSchemes(port int) []string {
+	if schemes := webSchemes(port, ""); len(schemes) > 0 {
+		return schemes
+	}
+	return []string{"http", "https"}
 }
 
 // bruteSubdomains 字典爆破：对每个候选前缀做 DNS 解析，能解析到的即为存活子域名。

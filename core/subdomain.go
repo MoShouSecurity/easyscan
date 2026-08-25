@@ -40,16 +40,52 @@ func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions, s
 	seen := map[string]bool{}
 	var fofaResults []fofaResult
 
-	// 1. FOFA 被动收集（配置了 API key 才执行），子域名与 IP 去重入库。
+	// 1. FOFA 查询与 subfinder 并行（两者都是网络往返，互不依赖）。
+	// 结果经局部变量回传；errored 用于"任一源查询失败"标记（各自独立降级）。
+	var fofaErrs []string
+	var subErr error
+	var wg sync.WaitGroup
 	if opts.FofaKey != "" {
-		results, err := fofaSearch(ctx, domain, opts.FofaKey, opts.ProxyURL, fofaTimeout(opts.Timeout))
-		if err != nil {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results, err := fofaSearch(ctx, domain, opts.FofaKey, opts.ProxyURL, fofaTimeout(opts.Timeout))
+			if err != nil {
+				fofaErrs = append(fofaErrs, err.Error())
+				return
+			}
+			fofaResults = results
+		}()
+	}
+	if opts.SubdomainBrute {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			subs, err := enumerateWithSubfinder(ctx, domain, opts.ProviderConfigPath, opts.ProxyURL)
+			if err != nil {
+				subErr = err
+				return
+			}
+			if err := persistEnumerated(store, domain, taskID, "subfinder", subs); err != nil {
+				subErr = err
+				return
+			}
+			// 主流程在 wg.Wait 之后才读 seen，此处并发写与主流程无重叠。
+			for _, s := range subs {
+				seen[s] = true
+			}
+		}()
+	}
+	wg.Wait()
+
+	// 1b. 合并 FOFA 结果（查询失败独立降级；入库失败中止）。
+	if opts.FofaKey != "" {
+		if len(fofaErrs) > 0 {
 			if report != nil {
-				report("子域名枚举", "FOFA 查询失败，降级继续: "+err.Error(), 5)
+				report("子域名枚举", "FOFA 查询失败，降级继续: "+fofaErrs[0], 5)
 			}
 		} else {
-			fofaResults = results
-			for _, r := range results {
+			for _, r := range fofaResults {
 				seen[r.Host] = true
 				if store != nil {
 					if err := store.UpsertSubdomain(Subdomain{
@@ -65,9 +101,18 @@ func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions, s
 					}
 				}
 			}
-			if report != nil && len(results) > 0 {
-				report("子域名枚举", fmt.Sprintf("FOFA 收集 %d 个子域名", len(results)), 5)
+			if report != nil && len(fofaResults) > 0 {
+				report("子域名枚举", fmt.Sprintf("FOFA 收集 %d 个子域名", len(fofaResults)), 5)
 			}
+		}
+	}
+	// 1c. subfinder 失败/入库失败（与现状语义一致：失败中止枚举）。
+	if opts.SubdomainBrute {
+		if subErr != nil {
+			return nil, fmt.Errorf("subfinder 收集失败: %w", subErr)
+		}
+		if report != nil {
+			report("子域名枚举", "subfinder 完成后进入爆破阶段", 5)
 		}
 	}
 
@@ -90,21 +135,7 @@ func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions, s
 	}
 
 	if opts.SubdomainBrute {
-		// 3. subfinder 被动收集（多公开数据源，走代理）。
-		if report != nil {
-			report("子域名枚举", "subfinder 被动收集 ...", 5)
-		}
-		if subs, err := enumerateWithSubfinder(ctx, domain, opts.ProviderConfigPath, opts.ProxyURL); err == nil {
-			if err := persistEnumerated(store, domain, taskID, "subfinder", subs); err != nil {
-				_ = waitProbe()
-				return nil, err
-			}
-			for _, s := range subs {
-				seen[s] = true
-			}
-		}
-
-		// 4. ksubdomain 主动爆破：优先提权执行（弹授权框），失败再子进程隔离执行，最后降级纯 Go。
+		// 3. ksubdomain 主动爆破：优先提权执行（弹授权框），失败再子进程隔离执行，最后降级纯 Go。
 		// 库内直调有 SDK Fatalf（os.Exit）闪退风险，父进程内只走子进程隔离版本。
 		enumerated := false
 		if report != nil {

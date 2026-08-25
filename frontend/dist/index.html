@@ -95,8 +95,10 @@
   .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; width: 460px; max-width: 92vw; padding: 20px; box-shadow: 0 20px 60px rgba(0,0,0,.5); }
   .modal h2 { font-size: 16px; margin-bottom: 16px; }
   label { display: block; color: var(--muted); margin: 12px 0 4px; font-size: 12px; }
-  input[type=text], select { width: 100%; padding: 8px 10px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 13px; }
-  input:focus, select:focus { outline: none; border-color: var(--accent); }
+  input[type=text], select, textarea { width: 100%; padding: 8px 10px; background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; color: var(--text); font-size: 13px; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  /* textarea 与 input 对齐：统一字体、去掉原生 resize 手柄，留足 5 行高度 */
+  textarea { font-family: inherit; resize: none; min-height: 96px; line-height: 1.5; }
   .row { display: flex; gap: 10px; } .row > div { flex: 1; }
   .opts { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 10px; margin-top: 12px; }
   .check { display: flex; align-items: center; gap: 7px; color: var(--text); font-size: 12px; }
@@ -136,7 +138,7 @@
   <div class="modal">
     <h2>新建侦察任务</h2>
     <label>目标（支持多个，每行一个；域名拆多个任务，IP 合并一个任务）</label>
-    <textarea id="mTarget" rows="3" placeholder="example.com&#10;1.2.3.0/24" oninput="updateTypeHint()" style="resize:vertical"></textarea>
+    <textarea id="mTarget" rows="4" placeholder="example.com&#10;1.2.3.0/24" oninput="updateTypeHint()"></textarea>
     <div id="typeHint" style="font-size:11px;color:var(--accent);margin-top:4px;display:none"></div>
     <label>端口模式</label>
     <select id="mPort" onchange="togglePortSpec()"><option value="test">测试（6端口）</option><option value="top100">Top 100</option><option value="top1000" selected>Top 1000</option><option value="all">全部端口</option><option value="custom">自定义端口</option></select>

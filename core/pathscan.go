@@ -21,6 +21,7 @@ const (
 	maxPathDictionaryRows = 10000
 	maxPathResponseSize   = 256 << 10
 	maxPathConcurrency    = 50
+	quickPathProbeBudget  = 30000
 )
 
 // pathProbe 描述一次同源 HTTP 路径探测。signature 为空时依靠软 404 基线过滤误报。
@@ -56,6 +57,79 @@ func limitPathProbeSource(source pathProbeSource, limit int) pathProbeSource {
 			count++
 			return yield(probe)
 		})
+	}
+}
+
+// prioritizedSamplePathProbeSource 先产生高价值探测项，再从完整且稳定排序的字典中
+// 等距抽样补足 target 条。抽样覆盖完整字典范围，避免简单截取前 N 条造成路径前缀偏斜。
+func prioritizedSamplePathProbeSource(priority, full pathProbeSource, fullCount, target int) pathProbeSource {
+	var overlapOnce sync.Once
+	var priorityOverlap int
+	var overlapErr error
+	return func(yield func(pathProbe) bool) error {
+		if priority == nil || full == nil || fullCount < 1 || target < 1 || target > fullCount {
+			return fmt.Errorf("快速路径探测源或抽样预算无效")
+		}
+		seen := make(map[string]struct{})
+		priorityCount := 0
+		stopped := false
+		if err := priority(func(probe pathProbe) bool {
+			if _, exists := seen[probe.path]; exists {
+				return true
+			}
+			seen[probe.path] = struct{}{}
+			priorityCount++
+			if !yield(probe) {
+				stopped = true
+				return false
+			}
+			return priorityCount < target
+		}); err != nil {
+			return err
+		}
+		if stopped || priorityCount >= target {
+			return nil
+		}
+
+		// 优先列表可能包含完整字典中没有的旧规则。首次使用时核对真实重合数，
+		// 后续站点复用该结果，避免候选总量估算偏差影响抽样末端覆盖。
+		overlapOnce.Do(func() {
+			overlapErr = full(func(probe pathProbe) bool {
+				if _, exists := seen[probe.path]; exists {
+					priorityOverlap++
+				}
+				return true
+			})
+		})
+		if overlapErr != nil {
+			return overlapErr
+		}
+		remaining := target - priorityCount
+		candidateTotal := fullCount - priorityOverlap
+		candidateIndex := 0
+		selected := 0
+		err := full(func(probe pathProbe) bool {
+			if _, exists := seen[probe.path]; exists {
+				return true
+			}
+			candidateIndex++
+			if int64(candidateIndex)*int64(remaining) < int64(selected+1)*int64(candidateTotal) {
+				return true
+			}
+			selected++
+			if !yield(probe) {
+				stopped = true
+				return false
+			}
+			return selected < remaining
+		})
+		if err != nil {
+			return err
+		}
+		if !stopped && selected != remaining {
+			return fmt.Errorf("快速路径抽样仅产生 %d 条，期望 %d 条", priorityCount+selected, target)
+		}
+		return nil
 	}
 }
 

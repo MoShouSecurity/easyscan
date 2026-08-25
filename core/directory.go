@@ -30,7 +30,7 @@ var validPathKinds = map[string]bool{
 	"file":      true,
 }
 
-// quickDirectoryProbes 覆盖常见管理入口、API 文档、调试端点和公开资源目录。
+// quickDirectoryProbes 是快速模式优先探测的常见入口；随后从完整路径字典均匀补足 3 万条。
 var quickDirectoryProbes = []pathProbe{
 	{path: "/admin", kind: "directory"},
 	{path: "/administrator", kind: "directory"},
@@ -203,7 +203,12 @@ func directoryProbeSourceForMode(probes []pathProbe, mode string) (pathProbeSour
 	if normalizePathScanMode(mode) == PathScanModeDeep {
 		return limitPathProbeSource(directoryProbeSource(nil), builtinPathCount), builtinPathCount
 	}
-	return limitPathProbeSource(directoryProbeSource(quickDirectoryProbes), len(quickDirectoryProbes)), len(quickDirectoryProbes)
+	return prioritizedSamplePathProbeSource(
+		directoryProbeSource(quickDirectoryProbes),
+		directoryProbeSource(nil),
+		builtinPathCount,
+		quickPathProbeBudget,
+	), quickPathProbeBudget
 }
 
 // directoryProbeSource 中 probes 为 nil 时流式解压内置字典；非 nil 时使用自定义字典。

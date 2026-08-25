@@ -27,7 +27,7 @@ var builtinLeakDictionary []byte
 
 const builtinLeakRuleCount = 153737
 
-// quickLeakRules 保留最常见且高价值的敏感文件，作为默认扫描集合。
+// quickLeakRules 是快速模式优先探测的高价值条目；随后从完整泄漏字典均匀补足 3 万条。
 var quickLeakRules = []leakRule{
 	{Path: "/.git/config", Type: "git", Sig: "[core]"},
 	{Path: "/.git/HEAD", Type: "git", Sig: "ref:"},
@@ -191,7 +191,12 @@ func leakProbeSourceForMode(rules []leakRule, mode string) (pathProbeSource, int
 	if normalizePathScanMode(mode) == PathScanModeDeep {
 		return limitPathProbeSource(leakProbeSource(nil), builtinLeakRuleCount), builtinLeakRuleCount
 	}
-	return limitPathProbeSource(leakProbeSource(quickLeakRules), len(quickLeakRules)), len(quickLeakRules)
+	return prioritizedSamplePathProbeSource(
+		leakProbeSource(quickLeakRules),
+		leakProbeSource(nil),
+		builtinLeakRuleCount,
+		quickPathProbeBudget,
+	), quickPathProbeBudget
 }
 
 func leakProbeSource(rules []leakRule) pathProbeSource {

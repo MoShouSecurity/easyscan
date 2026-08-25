@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -117,32 +119,131 @@ func TestPathScanModesUseBoundedSources(t *testing.T) {
 
 	leakSource, leakBudget := leakProbeSourceForMode(nil, PathScanModeQuick)
 	quickLeakCount := 0
-	if err := leakSource(func(pathProbe) bool {
+	leakPaths := make(map[string]struct{}, quickPathProbeBudget)
+	if err := leakSource(func(probe pathProbe) bool {
+		if quickLeakCount < len(quickLeakRules) && probe.path != quickLeakRules[quickLeakCount].Path {
+			t.Fatalf("quick leak priority[%d] = %q, want %q", quickLeakCount, probe.path, quickLeakRules[quickLeakCount].Path)
+		}
+		if _, exists := leakPaths[probe.path]; exists {
+			t.Fatalf("duplicate quick leak path: %q", probe.path)
+		}
+		leakPaths[probe.path] = struct{}{}
 		quickLeakCount++
 		return true
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if quickLeakCount != len(quickLeakRules) || leakBudget != len(quickLeakRules) {
-		t.Fatalf("quick leak count=%d budget=%d want=%d", quickLeakCount, leakBudget, len(quickLeakRules))
+	if quickLeakCount != quickPathProbeBudget || leakBudget != quickPathProbeBudget {
+		t.Fatalf("quick leak count=%d budget=%d want=%d", quickLeakCount, leakBudget, quickPathProbeBudget)
 	}
 
 	directorySource, directoryBudget := directoryProbeSourceForMode(nil, PathScanModeQuick)
 	quickDirectoryCount := 0
-	if err := directorySource(func(pathProbe) bool {
+	directoryPaths := make(map[string]struct{}, quickPathProbeBudget)
+	if err := directorySource(func(probe pathProbe) bool {
+		if quickDirectoryCount < len(quickDirectoryProbes) && probe != quickDirectoryProbes[quickDirectoryCount] {
+			t.Fatalf("quick directory priority[%d] = %+v, want %+v", quickDirectoryCount, probe, quickDirectoryProbes[quickDirectoryCount])
+		}
+		if _, exists := directoryPaths[probe.path]; exists {
+			t.Fatalf("duplicate quick directory path: %q", probe.path)
+		}
+		directoryPaths[probe.path] = struct{}{}
 		quickDirectoryCount++
 		return true
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if quickDirectoryCount != len(quickDirectoryProbes) || directoryBudget != len(quickDirectoryProbes) {
-		t.Fatalf("quick directory count=%d budget=%d want=%d", quickDirectoryCount, directoryBudget, len(quickDirectoryProbes))
+	if quickDirectoryCount != quickPathProbeBudget || directoryBudget != quickPathProbeBudget {
+		t.Fatalf("quick directory count=%d budget=%d want=%d", quickDirectoryCount, directoryBudget, quickPathProbeBudget)
 	}
 
 	_, deepLeakBudget := leakProbeSourceForMode(nil, PathScanModeDeep)
 	_, deepDirectoryBudget := directoryProbeSourceForMode(nil, PathScanModeDeep)
 	if deepLeakBudget != builtinLeakRuleCount || deepDirectoryBudget != builtinPathCount {
 		t.Fatalf("deep budgets leak=%d directory=%d", deepLeakBudget, deepDirectoryBudget)
+	}
+}
+
+func TestPrioritizedSamplePathProbeSourceIsStableAndDistributed(t *testing.T) {
+	priority := func(yield func(pathProbe) bool) error {
+		yield(pathProbe{path: "/p5", kind: "route"})
+		return nil
+	}
+	full := func(yield func(pathProbe) bool) error {
+		for i := 0; i < 10; i++ {
+			if !yield(pathProbe{path: fmt.Sprintf("/p%d", i), kind: "route"}) {
+				return nil
+			}
+		}
+		return nil
+	}
+	source := prioritizedSamplePathProbeSource(priority, full, 10, 5)
+	var got []string
+	if err := source(func(probe pathProbe) bool {
+		got = append(got, probe.path)
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/p5", "/p2", "/p4", "/p7", "/p9"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("sampled paths = %#v, want %#v", got, want)
+	}
+}
+
+func TestPrioritizedSamplePathProbeSourceRejectsShortFullSource(t *testing.T) {
+	priority := func(yield func(pathProbe) bool) error {
+		yield(pathProbe{path: "/priority", kind: "route"})
+		return nil
+	}
+	shortFull := func(yield func(pathProbe) bool) error {
+		yield(pathProbe{path: "/only-one", kind: "route"})
+		return nil
+	}
+	err := prioritizedSamplePathProbeSource(priority, shortFull, 10, 5)(func(pathProbe) bool { return true })
+	if err == nil || !strings.Contains(err.Error(), "期望 5 条") {
+		t.Fatalf("unexpected short source error: %v", err)
+	}
+}
+
+func TestPrioritizedSamplePathProbeSourceSupportsConcurrentReuse(t *testing.T) {
+	priority := func(yield func(pathProbe) bool) error {
+		yield(pathProbe{path: "/priority", kind: "route"})
+		return nil
+	}
+	full := func(yield func(pathProbe) bool) error {
+		for i := 0; i < 100; i++ {
+			if !yield(pathProbe{path: fmt.Sprintf("/item-%03d", i), kind: "route"}) {
+				return nil
+			}
+		}
+		return nil
+	}
+	source := prioritizedSamplePathProbeSource(priority, full, 100, 30)
+	var workers sync.WaitGroup
+	errors := make(chan error, 8)
+	for i := 0; i < 8; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			count := 0
+			err := source(func(pathProbe) bool {
+				count++
+				return true
+			})
+			if err != nil {
+				errors <- err
+				return
+			}
+			if count != 30 {
+				errors <- fmt.Errorf("sample count = %d, want 30", count)
+			}
+		}()
+	}
+	workers.Wait()
+	close(errors)
+	for err := range errors {
+		t.Error(err)
 	}
 }
 
@@ -367,7 +468,7 @@ func TestPathScanCapsConcurrentRequests(t *testing.T) {
 	}
 }
 
-func TestPostProcessQuickModePersistsLeakAndDirectoryHits(t *testing.T) {
+func TestPostProcessPersistsLeakAndDirectoryHitsIncrementally(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/.git/config", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("[core]\nrepositoryformatversion = 0"))
@@ -385,12 +486,22 @@ func TestPostProcessQuickModePersistsLeakAndDirectoryHits(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
+	leakDictPath := filepath.Join(t.TempDir(), "leaks.txt")
+	if err := os.WriteFile(leakDictPath, []byte("/.git/config git [core]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	directoryDictPath := filepath.Join(t.TempDir(), "paths.txt")
+	if err := os.WriteFile(directoryDictPath, []byte("/admin directory\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	engine := NewEngine(store, ScanOptions{
-		FileLeak:      true,
-		DirectoryScan: true,
-		PathScanMode:  PathScanModeQuick,
-		Concurrency:   100,
-		Timeout:       2 * time.Second,
+		FileLeak:          true,
+		DirectoryScan:     true,
+		PathScanMode:      PathScanModeQuick,
+		LeakDictPath:      leakDictPath,
+		DirectoryDictPath: directoryDictPath,
+		Concurrency:       100,
+		Timeout:           2 * time.Second,
 	})
 	if err := engine.postProcess(context.Background(), []Site{{URL: server.URL}}, "task", func(string, string, int) {}, 90); err != nil {
 		t.Fatal(err)

@@ -32,7 +32,7 @@ type ScanOptions struct {
 	FileLeak bool `json:"file_leak"`
 	// DirectoryScan 是否执行 Web 路径发现。字段名为兼容旧版保留。
 	DirectoryScan bool `json:"directory_scan"`
-	// PathScanMode 路径扫描强度：quick 使用高价值路径，deep 使用完整内置字典。
+	// PathScanMode 路径扫描强度：quick 每类约 3 万条，deep 使用完整内置字典。
 	PathScanMode string `json:"path_scan_mode"`
 	// Screenshot 是否对站点首页截图。
 	Screenshot bool `json:"screenshot"`

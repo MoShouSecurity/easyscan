@@ -169,9 +169,12 @@ func runNucleiYAML(ctx context.Context, site Site, taskID string, templates []Nu
 		return nil
 	}
 	base := strings.TrimSuffix(scope.baseURL, "/")
+	// client 每站点一次（http.Client 并发安全）：原实现每个模板新建一份连接池，
+	// 模板多时浪费且慢。DialContext 固定站点 IP，跨站点不可复用，per-site 复用到顶。
+	client := scope.client(timeout, 0)
 	var out []Leak
 	for _, tpl := range templates {
-		if url, status, ok := matchNucleiTemplate(ctx, tpl, scope, base, timeout); ok {
+		if url, status, ok := matchNucleiTemplate(ctx, tpl, client, scope, base); ok {
 			name := tpl.Info.Name
 			if name == "" {
 				name = tpl.ID
@@ -200,9 +203,7 @@ func firstPath(t NucleiTemplate) string {
 }
 
 // matchNucleiTemplate 执行单个模板，命中返回命中的 URL 与响应状态码。
-func matchNucleiTemplate(ctx context.Context, tpl NucleiTemplate, scope siteScope, base string, timeout time.Duration) (string, int, bool) {
-	client := scope.client(timeout, 0)
-
+func matchNucleiTemplate(ctx context.Context, tpl NucleiTemplate, client *http.Client, scope siteScope, base string) (string, int, bool) {
 	for _, req := range tpl.Requests {
 		method := strings.ToUpper(req.Method)
 		if method == "" {

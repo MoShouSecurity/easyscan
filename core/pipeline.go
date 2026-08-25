@@ -617,27 +617,56 @@ func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, r
 	}
 	if e.opts.Nuclei {
 		report("POC 检测", fmt.Sprintf("检测 %d 个站点", len(sites)), pct)
-		for _, site := range sites {
-			for _, leak := range runNuclei(ctx, site, taskID, e.opts.Timeout) {
-				if err := e.store.UpsertLeak(leak); err != nil {
-					return fmt.Errorf("保存 POC 结果 %s: %w", leak.URL, err)
-				}
-			}
-		}
-		// 自定义 nuclei 模板目录。
+		// 自定义模板一次加载（共享给所有站点），加载失败降级内置。
+		var yamlTpls []NucleiTemplate
 		if e.opts.NucleiTemplatesDir != "" {
-			if templates, err := loadNucleiTemplates(e.opts.NucleiTemplatesDir); err == nil && len(templates) > 0 {
-				report("POC 检测", fmt.Sprintf("加载 %d 个自定义模板", len(templates)), pct)
-				for _, site := range sites {
-					for _, leak := range runNucleiYAML(ctx, site, taskID, templates, e.opts.Timeout) {
-						if err := e.store.UpsertLeak(leak); err != nil {
-							return fmt.Errorf("保存自定义 POC 结果 %s: %w", leak.URL, err)
-						}
-					}
-				}
+			if tpls, err := loadNucleiTemplates(e.opts.NucleiTemplatesDir); err == nil && len(tpls) > 0 {
+				yamlTpls = tpls
+				report("POC 检测", fmt.Sprintf("加载 %d 个自定义模板", len(tpls)), pct)
 			} else if err != nil {
 				report("POC 检测", "加载模板目录失败: "+err.Error(), pct)
 			}
+		}
+		// 站点级并发（sem=10）：原三重串行（站点×模板×路径）改为站点间并行，
+		// 模板/路径循环在站点 goroutine 内保持原顺序；首个写库错误温和中止。
+		const nucleiConcurrentSites = 10
+		sem := make(chan struct{}, nucleiConcurrentSites)
+		var wg sync.WaitGroup
+		var firstErr error
+		var errOnce sync.Once
+		var done int32
+		for _, site := range sites {
+			site := site
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					return
+				}
+				defer func() { <-sem }()
+				for _, leak := range runNuclei(ctx, site, taskID, e.opts.Timeout) {
+					if err := e.store.UpsertLeak(leak); err != nil {
+						errOnce.Do(func() { firstErr = fmt.Errorf("保存 POC 结果 %s: %w", leak.URL, err) })
+						return
+					}
+				}
+				for _, leak := range runNucleiYAML(ctx, site, taskID, yamlTpls, e.opts.Timeout) {
+					if err := e.store.UpsertLeak(leak); err != nil {
+						errOnce.Do(func() { firstErr = fmt.Errorf("保存自定义 POC 结果 %s: %w", leak.URL, err) })
+						return
+					}
+				}
+				atomic.AddInt32(&done, 1)
+			}()
+		}
+		wg.Wait()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if firstErr != nil {
+			return firstErr
 		}
 		pct += 3
 		report("POC 检测", "完成", pct)

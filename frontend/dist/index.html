@@ -109,6 +109,13 @@
 </style>
 </head>
 <body>
+<!-- 截图放大悬浮层（Lightbox）：必须位于主 script 之前——
+     内联 script 同步执行，骨架在脚本之后会导致监听绑定 getElementById 落空 -->
+<div class="lightbox" id="lightbox">
+  <div class="lb-close" id="lbClose">×</div>
+  <img id="lbImg" alt="站点截图" />
+  <div class="lb-info" id="lbInfo"></div>
+</div>
 <div class="topbar">
   <span class="logo">Easy Scan</span>
   <button class="ghost" id="backBtn" style="display:none" onclick="goHome()">← 返回</button>
@@ -766,6 +773,9 @@ async function openLightbox(siteID) {
   if (!site || !site.screenshot) return;
   document.getElementById('lightbox').classList.add('show');
   currentShotSiteID = siteID;
+  // 重开时重置缩放倍率与图片变换。
+  lbScale = 1;
+  LB_IMG.style.transform = 'scale(1)';
   const info = (site.url || '') + (site.title ? ' · ' + site.title : '') +
     (site.fingerprint ? ' · ' + site.fingerprint : '') +
     (site.status_code ? ' · HTTP ' + site.status_code : '');
@@ -785,11 +795,25 @@ function closeLightbox() {
   document.getElementById('lightbox').classList.remove('show');
   currentShotSiteID = null;
 }
-// 右上关闭按钮 + 遮罩点击（仅点遮罩本身，图片/信息栏不触发）。
-document.getElementById('lbClose').addEventListener('click', closeLightbox);
-document.getElementById('lightbox').addEventListener('click', (e) => {
-  if (e.target.id === 'lightbox') closeLightbox();
-});
+// lbScale 大图缩放倍率（滚轮调节，上限 4x，重开时重置）。
+let lbScale = 1;
+const LIGHTBOX = document.getElementById('lightbox');
+const LB_IMG = document.getElementById('lbImg');
+const LB_CLOSE = document.getElementById('lbClose');
+// 右上关闭按钮 + 点击图片/遮罩恢复小图（图片上禁用默认拖拽，防误触）。
+if (LB_CLOSE) LB_CLOSE.addEventListener('click', closeLightbox);
+if (LIGHTBOX) {
+  LIGHTBOX.addEventListener('click', (e) => {
+    if (e.target === LIGHTBOX || e.target === LB_IMG) closeLightbox();
+  });
+  // 滚轮缩放：上滚放大 / 下滚缩小，clamp 0.5-4x；缩放后图片不感知遮罩关闭。
+  LIGHTBOX.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    if (e.deltaY < 0) lbScale = Math.min(4, lbScale + 0.2);
+    else lbScale = Math.max(0.5, lbScale - 0.2);
+    LB_IMG.style.transform = 'scale(' + lbScale + ')';
+  });
+}
 // ESC 关闭（一次性注册标记，防重复监听）。
 if (!window.__lbKbBound) {
   window.__lbKbBound = true;
@@ -801,11 +825,5 @@ if (!window.__lbKbBound) {
 renderHome();
 setInterval(poll, 2500);
 </script>
-<!-- 截图放大悬浮层：点击缩略图展示，ESC/遮罩/关闭按钮关闭 -->
-<div class="lightbox" id="lightbox">
-  <div class="lb-close" id="lbClose">×</div>
-  <img id="lbImg" alt="站点截图" />
-  <div class="lb-info" id="lbInfo"></div>
-</div>
 </body>
 </html>

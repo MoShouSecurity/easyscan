@@ -42,6 +42,23 @@ type pathHit struct {
 // pathProbeSource 按需产生探测项。返回错误表示字典损坏或读取失败。
 type pathProbeSource func(yield func(pathProbe) bool) error
 
+// limitPathProbeSource 为单站探测设置硬性请求预算，防止损坏或意外扩张的字典无限产出。
+func limitPathProbeSource(source pathProbeSource, limit int) pathProbeSource {
+	return func(yield func(pathProbe) bool) error {
+		if source == nil || limit < 1 {
+			return fmt.Errorf("路径探测源为空或请求预算无效")
+		}
+		count := 0
+		return source(func(probe pathProbe) bool {
+			if count >= limit {
+				return false
+			}
+			count++
+			return yield(probe)
+		})
+	}
+}
+
 // scanPaths 并发探测一个站点下的路径。请求始终固定到发现阶段确认的 IP，且不跟随重定向。
 func scanPaths(ctx context.Context, site Site, timeout time.Duration, concurrency int, probes []pathProbe, accept func(int) bool) ([]pathHit, error) {
 	if len(probes) == 0 {
@@ -57,78 +74,148 @@ func scanPaths(ctx context.Context, site Site, timeout time.Duration, concurrenc
 	}, accept)
 }
 
-// scanPathSource 流式消费探测路径，避免大型内置字典被展开为中间切片。
+// scanPathSource 流式消费探测路径，并为需要一次性结果的调用方收集命中项。
 func scanPathSource(ctx context.Context, site Site, timeout time.Duration, concurrency int, source pathProbeSource, accept func(int) bool) ([]pathHit, error) {
-	scope, err := newSiteScope(site)
+	results := make([]pathHit, 0)
+	err := scanPathSourceEach(ctx, site, timeout, concurrency, source, accept, func(hit pathHit) error {
+		results = append(results, hit)
+		return nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("初始化站点扫描范围: %w", err)
-	}
-	if source == nil || accept == nil {
-		return nil, fmt.Errorf("路径探测源或状态码过滤器为空")
-	}
-	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	client := scope.client(timeout, 0)
-	base := strings.TrimSuffix(scope.baseURL, "/")
-	baseline := fetchSoft404Baseline(ctx, client, base)
+	sort.Slice(results, func(i, j int) bool { return results[i].url < results[j].url })
+	return results, nil
+}
 
+// scanPathSourceEach 逐条交付命中结果，避免深度扫描把全部结果滞留在内存中。
+// 字典生产协程和每个探测 worker 都独立捕获 panic，单个异常只会终止当前任务。
+func scanPathSourceEach(ctx context.Context, site Site, timeout time.Duration, concurrency int, source pathProbeSource, accept func(int) bool, onHit func(pathHit) error) error {
+	scope, err := newSiteScope(site)
+	if err != nil {
+		return fmt.Errorf("初始化站点扫描范围: %w", err)
+	}
+	if source == nil || accept == nil || onHit == nil {
+		return fmt.Errorf("路径探测源、状态码过滤器或结果处理器为空")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if concurrency < 1 {
 		concurrency = 1
 	}
 	if concurrency > maxPathConcurrency {
 		concurrency = maxPathConcurrency
 	}
+	scanCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	client := scope.clientWithConnectionLimit(timeout, 0, concurrency)
+	defer client.CloseIdleConnections()
+	base := strings.TrimSuffix(scope.baseURL, "/")
+	baseline := fetchSoft404Baseline(scanCtx, client, base)
+	if err := scanCtx.Err(); err != nil {
+		return err
+	}
+
 	jobs := make(chan pathProbe)
 	hits := make(chan pathHit)
-	sourceErr := make(chan error, 1)
-	var workers sync.WaitGroup
+	workerErrors := make(chan error, concurrency+1)
+	var producers sync.WaitGroup
+	reportError := func(err error) {
+		if err == nil {
+			return
+		}
+		workerErrors <- err
+		cancel()
+	}
+
 	for i := 0; i < concurrency; i++ {
-		workers.Add(1)
+		producers.Add(1)
 		go func() {
-			defer workers.Done()
-			for probe := range jobs {
-				hit, ok := probePath(ctx, client, base, baseline, probe, accept)
+			defer producers.Done()
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					reportError(recoveredPanicError("路径扫描工作协程", recovered))
+				}
+			}()
+			for {
+				var probe pathProbe
+				var ok bool
+				select {
+				case <-scanCtx.Done():
+					return
+				case probe, ok = <-jobs:
+					if !ok {
+						return
+					}
+				}
+				hit, ok := probePath(scanCtx, client, base, baseline, probe, accept)
 				if !ok {
 					continue
 				}
 				select {
 				case hits <- hit:
-				case <-ctx.Done():
+				case <-scanCtx.Done():
 					return
 				}
 			}
 		}()
 	}
 
+	producers.Add(1)
 	go func() {
+		defer producers.Done()
 		defer close(jobs)
-		sourceErr <- source(func(probe pathProbe) bool {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				reportError(recoveredPanicError("路径字典读取协程", recovered))
+			}
+		}()
+		if err := source(func(probe pathProbe) bool {
 			select {
 			case jobs <- probe:
 				return true
-			case <-ctx.Done():
+			case <-scanCtx.Done():
 				return false
 			}
-		})
+		}); err != nil {
+			reportError(fmt.Errorf("读取路径字典: %w", err))
+		}
 	}()
 	go func() {
-		workers.Wait()
+		producers.Wait()
 		close(hits)
+		close(workerErrors)
 	}()
 
-	results := make([]pathHit, 0)
-	for hit := range hits {
-		results = append(results, hit)
-	}
-	if err := <-sourceErr; err != nil {
-		return nil, fmt.Errorf("读取路径字典: %w", err)
+	var firstErr error
+	for hits != nil || workerErrors != nil {
+		select {
+		case hit, ok := <-hits:
+			if !ok {
+				hits = nil
+				continue
+			}
+			if firstErr == nil {
+				if err := onHit(hit); err != nil {
+					firstErr = err
+					cancel()
+				}
+			}
+		case err, ok := <-workerErrors:
+			if !ok {
+				workerErrors = nil
+				continue
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return err
 	}
-	sort.Slice(results, func(i, j int) bool { return results[i].url < results[j].url })
-	return results, nil
+	return firstErr
 }
 
 func probePath(ctx context.Context, client *http.Client, base string, baseline soft404Baseline, probe pathProbe, accept func(int) bool) (pathHit, bool) {

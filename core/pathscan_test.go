@@ -1,6 +1,7 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -108,6 +110,63 @@ func TestBuiltinLeakDictionaryIsNormalizedAndUnique(t *testing.T) {
 	}
 }
 
+func TestPathScanModesUseBoundedSources(t *testing.T) {
+	if got := DefaultScanOptions().PathScanMode; got != PathScanModeQuick {
+		t.Fatalf("default path scan mode = %q, want %q", got, PathScanModeQuick)
+	}
+
+	leakSource, leakBudget := leakProbeSourceForMode(nil, PathScanModeQuick)
+	quickLeakCount := 0
+	if err := leakSource(func(pathProbe) bool {
+		quickLeakCount++
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if quickLeakCount != len(quickLeakRules) || leakBudget != len(quickLeakRules) {
+		t.Fatalf("quick leak count=%d budget=%d want=%d", quickLeakCount, leakBudget, len(quickLeakRules))
+	}
+
+	directorySource, directoryBudget := directoryProbeSourceForMode(nil, PathScanModeQuick)
+	quickDirectoryCount := 0
+	if err := directorySource(func(pathProbe) bool {
+		quickDirectoryCount++
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if quickDirectoryCount != len(quickDirectoryProbes) || directoryBudget != len(quickDirectoryProbes) {
+		t.Fatalf("quick directory count=%d budget=%d want=%d", quickDirectoryCount, directoryBudget, len(quickDirectoryProbes))
+	}
+
+	_, deepLeakBudget := leakProbeSourceForMode(nil, PathScanModeDeep)
+	_, deepDirectoryBudget := directoryProbeSourceForMode(nil, PathScanModeDeep)
+	if deepLeakBudget != builtinLeakRuleCount || deepDirectoryBudget != builtinPathCount {
+		t.Fatalf("deep budgets leak=%d directory=%d", deepLeakBudget, deepDirectoryBudget)
+	}
+}
+
+func TestLimitPathProbeSourceCapsDictionary(t *testing.T) {
+	source := limitPathProbeSource(func(yield func(pathProbe) bool) error {
+		for i := 0; i < 5; i++ {
+			if !yield(pathProbe{path: "/item", kind: "route"}) {
+				return nil
+			}
+		}
+		return nil
+	}, 2)
+	count := 0
+	if err := source(func(pathProbe) bool {
+		count++
+		return true
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("bounded source yielded %d probes, want 2", count)
+	}
+}
+
 func TestDetectDirectoriesFiltersSoft404AndKeepsUsefulStatuses(t *testing.T) {
 	soft404 := strings.Repeat("generic not found ", 20)
 	mux := http.NewServeMux()
@@ -168,5 +227,186 @@ func TestPathScanHonorsCancelledContext(t *testing.T) {
 	results, err := detectDirectories(ctx, Site{URL: server.URL}, "task", time.Second, 2, []pathProbe{{path: "/admin", kind: "directory"}})
 	if !errors.Is(err, context.Canceled) || len(results) != 0 {
 		t.Fatalf("cancelled scan returned results=%+v err=%v", results, err)
+	}
+}
+
+func TestPathScanStreamsHitsBeforeSourceCompletes(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/first", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("first")) })
+	mux.HandleFunc("/second", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("second")) })
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	firstPersisted := make(chan struct{})
+	source := func(yield func(pathProbe) bool) error {
+		if !yield(pathProbe{path: "/first", kind: "route"}) {
+			return nil
+		}
+		select {
+		case <-firstPersisted:
+		case <-time.After(2 * time.Second):
+			return errors.New("first hit was not delivered incrementally")
+		}
+		yield(pathProbe{path: "/second", kind: "route"})
+		return nil
+	}
+
+	paths := make([]string, 0, 2)
+	err := scanPathSourceEach(context.Background(), Site{URL: server.URL}, 2*time.Second, 1, source, func(status int) bool {
+		return status == http.StatusOK
+	}, func(hit pathHit) error {
+		paths = append(paths, hit.path)
+		if hit.path == "/first" {
+			close(firstPersisted)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"/first", "/second"}; !reflect.DeepEqual(paths, want) {
+		t.Fatalf("streamed paths = %#v, want %#v", paths, want)
+	}
+}
+
+func TestPathScanRecoversWorkerPanicAndWritesLog(t *testing.T) {
+	logDir := t.TempDir()
+	SetCrashLogDir(logDir)
+	defer SetCrashLogDir("")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/panic" {
+			_, _ = w.Write([]byte("ok"))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	err := scanPathSourceEach(context.Background(), Site{URL: server.URL}, 2*time.Second, 1, func(yield func(pathProbe) bool) error {
+		yield(pathProbe{path: "/panic", kind: "route"})
+		return nil
+	}, func(int) bool {
+		panic("path-scan-test-panic")
+	}, func(pathHit) error { return nil })
+	if err == nil || !strings.Contains(err.Error(), "路径扫描工作协程") {
+		t.Fatalf("unexpected panic recovery error: %v", err)
+	}
+	logPath := filepath.Join(logDir, "crash.log")
+	data, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Contains(data, []byte("path-scan-test-panic")) || !bytes.Contains(data, []byte("goroutine")) {
+		t.Fatalf("crash log missing panic or stack: %s", data)
+	}
+	info, statErr := os.Stat(logPath)
+	if statErr != nil {
+		t.Fatal(statErr)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("crash log mode = %o, want 600", info.Mode().Perm())
+	}
+}
+
+func TestPathScanClientConnectionLimits(t *testing.T) {
+	scope, err := newSiteScope(Site{IP: "127.0.0.1", URL: "http://example.invalid:8080"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := scope.clientWithConnectionLimit(3*time.Second, 0, 7)
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T", client.Transport)
+	}
+	if transport.MaxConnsPerHost != 7 || transport.MaxIdleConnsPerHost != 7 || transport.MaxIdleConns != 7 {
+		t.Fatalf("unexpected connection limits: %+v", transport)
+	}
+	if transport.ResponseHeaderTimeout != 3*time.Second || transport.TLSHandshakeTimeout != 3*time.Second {
+		t.Fatalf("unexpected transport timeouts: %+v", transport)
+	}
+}
+
+func TestPathScanCapsConcurrentRequests(t *testing.T) {
+	var active int64
+	var maximum int64
+	var requests int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&requests, 1)
+		current := atomic.AddInt64(&active, 1)
+		defer atomic.AddInt64(&active, -1)
+		for {
+			previous := atomic.LoadInt64(&maximum)
+			if current <= previous || atomic.CompareAndSwapInt64(&maximum, previous, current) {
+				break
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+
+	const probes = 500
+	err := scanPathSourceEach(context.Background(), Site{URL: server.URL}, 2*time.Second, 500, func(yield func(pathProbe) bool) error {
+		for i := 0; i < probes; i++ {
+			if !yield(pathProbe{path: "/missing", kind: "route"}) {
+				return nil
+			}
+		}
+		return nil
+	}, func(status int) bool { return status == http.StatusOK }, func(pathHit) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := atomic.LoadInt64(&requests); got != probes+1 {
+		t.Fatalf("request count = %d, want %d including baseline", got, probes+1)
+	}
+	if got := atomic.LoadInt64(&maximum); got > maxPathConcurrency {
+		t.Fatalf("maximum concurrent requests = %d, cap = %d", got, maxPathConcurrency)
+	}
+}
+
+func TestPostProcessQuickModePersistsLeakAndDirectoryHits(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/.git/config", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("[core]\nrepositoryformatversion = 0"))
+	})
+	mux.HandleFunc("/admin", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte("access denied"))
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) { http.NotFound(w, r) })
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	store, err := OpenStore("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	engine := NewEngine(store, ScanOptions{
+		FileLeak:      true,
+		DirectoryScan: true,
+		PathScanMode:  PathScanModeQuick,
+		Concurrency:   100,
+		Timeout:       2 * time.Second,
+	})
+	if err := engine.postProcess(context.Background(), []Site{{URL: server.URL}}, "task", func(string, string, int) {}, 90); err != nil {
+		t.Fatal(err)
+	}
+	leaks, err := store.ListLeaksByTask("task", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leaks) != 1 || leaks[0].Path != "/.git/config" {
+		t.Fatalf("persisted leaks = %+v", leaks)
+	}
+	directories, err := store.ListDirectoriesByTask("task", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(directories) != 1 || directories[0].Path != "/admin" {
+		t.Fatalf("persisted directories = %+v", directories)
 	}
 }

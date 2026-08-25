@@ -23,6 +23,10 @@ func NewEngine(store *Store, opts ScanOptions) *Engine {
 	if opts.Timeout <= 0 {
 		opts.Timeout = 5 * time.Second
 	}
+	opts.PathScanMode = normalizePathScanMode(opts.PathScanMode)
+	if ValidatePathScanMode(opts.PathScanMode) != nil {
+		opts.PathScanMode = PathScanModeQuick
+	}
 	return &Engine{store: store, opts: opts}
 }
 
@@ -535,9 +539,12 @@ func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, r
 		}
 	}
 	pct := base
+	pathModeLabel := "快速"
+	if e.opts.PathScanMode == PathScanModeDeep {
+		pathModeLabel = "深度"
+	}
 
 	if e.opts.FileLeak {
-		report("文件泄漏检测", fmt.Sprintf("探测 %d 个站点，内置敏感路径 %d 条", len(sites), builtinLeakRuleCount), pct)
 		var rules []leakRule // nil 表示流式使用内置压缩字典。
 		if e.opts.LeakDictPath != "" {
 			if custom, err := loadLeakDict(e.opts.LeakDictPath); err == nil && len(custom) > 0 {
@@ -547,22 +554,30 @@ func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, r
 				report("文件泄漏检测", "加载自定义字典失败，改用内置字典: "+err.Error(), pct)
 			}
 		}
-		for _, site := range sites {
-			leaks, err := detectLeaks(ctx, site, taskID, e.opts.Timeout, e.opts.Concurrency, rules)
-			if err != nil {
-				return fmt.Errorf("文件泄漏检测 %s: %w", site.URL, err)
-			}
-			for _, leak := range leaks {
+		source, requestBudget := leakProbeSourceForMode(rules, e.opts.PathScanMode)
+		leakModeLabel := pathModeLabel
+		if rules != nil {
+			leakModeLabel = "自定义字典"
+		}
+		report("文件泄漏检测", fmt.Sprintf("%s：探测 %d 个站点，每站路径预算 %d 条", leakModeLabel, len(sites), requestBudget), pct)
+		for index, site := range sites {
+			saved := 0
+			err := detectLeaksEach(ctx, site, taskID, e.opts.Timeout, e.opts.Concurrency, source, func(leak Leak) error {
 				if err := e.store.UpsertLeak(leak); err != nil {
 					return fmt.Errorf("保存泄漏结果 %s: %w", leak.URL, err)
 				}
+				saved++
+				return nil
+			})
+			if err != nil {
+				return fmt.Errorf("文件泄漏检测 %s: %w", site.URL, err)
 			}
+			report("文件泄漏检测", fmt.Sprintf("[%d/%d] %s，命中 %d 条", index+1, len(sites), site.URL, saved), pct)
 		}
 		pct += 3
 		report("文件泄漏检测", "完成", pct)
 	}
 	if e.opts.DirectoryScan {
-		report("路径发现", fmt.Sprintf("探测 %d 个站点，内置路径 %d 条（目录 %d / 路由 %d / 文件 %d）", len(sites), builtinPathCount, builtinDirectoryCount, builtinRouteCount, builtinFileCount), pct)
 		var probes []pathProbe // nil 表示流式使用内置压缩字典。
 		if e.opts.DirectoryDictPath != "" {
 			if custom, err := loadDirectoryDict(e.opts.DirectoryDictPath); err == nil {
@@ -572,16 +587,25 @@ func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, r
 				report("路径发现", "加载自定义字典失败，改用内置字典: "+err.Error(), pct)
 			}
 		}
-		for _, site := range sites {
-			results, err := detectDirectories(ctx, site, taskID, e.opts.Timeout, e.opts.Concurrency, probes)
+		source, requestBudget := directoryProbeSourceForMode(probes, e.opts.PathScanMode)
+		directoryModeLabel := pathModeLabel
+		if probes != nil {
+			directoryModeLabel = "自定义字典"
+		}
+		report("路径发现", fmt.Sprintf("%s：探测 %d 个站点，每站路径预算 %d 条", directoryModeLabel, len(sites), requestBudget), pct)
+		for index, site := range sites {
+			saved := 0
+			err := detectDirectoriesEach(ctx, site, taskID, e.opts.Timeout, e.opts.Concurrency, source, func(result DirectoryResult) error {
+				if err := e.store.UpsertDirectory(result); err != nil {
+					return fmt.Errorf("保存路径结果 %s: %w", result.URL, err)
+				}
+				saved++
+				return nil
+			})
 			if err != nil {
 				return fmt.Errorf("路径发现 %s: %w", site.URL, err)
 			}
-			for _, result := range results {
-				if err := e.store.UpsertDirectory(result); err != nil {
-					return fmt.Errorf("保存目录结果 %s: %w", result.URL, err)
-				}
-			}
+			report("路径发现", fmt.Sprintf("[%d/%d] %s，命中 %d 条", index+1, len(sites), site.URL, saved), pct)
 			if err := ctx.Err(); err != nil {
 				return err
 			}

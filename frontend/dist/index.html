@@ -133,6 +133,12 @@
       <div class="check"><input type="checkbox" id="mDirectory" /><span>路径发现（目录 / 路由 / 文件）</span></div>
       <div class="check"><input type="checkbox" id="mShot" checked /><span>站点截图</span></div>
     </div>
+    <label>路径扫描强度</label>
+    <select id="mPathMode">
+      <option value="quick" selected>快速（推荐，仅高价值路径）</option>
+      <option value="deep">深度（完整内置字典，耗时很长）</option>
+    </select>
+    <div style="font-size:11px;color:var(--muted);margin-top:4px">仅影响文件泄漏和路径发现；深度模式需显式选择。</div>
     <div class="actions">
       <button class="ghost" onclick="closeAddTask()">取消</button>
       <button class="primary" id="mSubmit" onclick="submitTask()">开始侦察</button>
@@ -540,6 +546,7 @@ async function submitTask() {
       nuclei: document.getElementById('mNuclei').checked,
       file_leak: document.getElementById('mLeak').checked,
       directory_scan: document.getElementById('mDirectory').checked,
+      path_scan_mode: document.getElementById('mPathMode').value,
       screenshot: document.getElementById('mShot').checked,
     };
     let count = 0;

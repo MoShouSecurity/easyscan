@@ -56,6 +56,7 @@ func (a *App) startup(ctx context.Context) {
 		println("create config dir:", err.Error())
 		return
 	}
+	core.SetCrashLogDir(dir)
 	dbPath := filepath.Join(dir, "easyscan.db")
 
 	// 加载配置（不存在则写入默认配置）。
@@ -142,6 +143,7 @@ type ScanRequest struct {
 	Nuclei     bool   `json:"nuclei"`
 	FileLeak   bool   `json:"file_leak"`
 	Directory  bool   `json:"directory_scan"`
+	PathMode   string `json:"path_scan_mode"`
 	Screenshot bool   `json:"screenshot"`
 }
 
@@ -171,6 +173,13 @@ func (a *App) StartScan(req ScanRequest) (string, error) {
 	opts.Nuclei = req.Nuclei
 	opts.FileLeak = req.FileLeak
 	opts.DirectoryScan = req.Directory
+	opts.PathScanMode = req.PathMode
+	if opts.PathScanMode == "" {
+		opts.PathScanMode = core.PathScanModeQuick
+	}
+	if err := core.ValidatePathScanMode(opts.PathScanMode); err != nil {
+		return "", err
+	}
 	opts.Screenshot = req.Screenshot
 	if req.Screenshot {
 		opts.ScreenshotDir = filepath.Join(a.configDir, "screenshots")
@@ -259,6 +268,9 @@ func (a *App) RescanTask(id string) (string, error) {
 		if err := json.Unmarshal([]byte(t.Params), &opts); err != nil {
 			return "", fmt.Errorf("旧任务参数损坏: %w", err)
 		}
+	}
+	if opts.PathScanMode == "" {
+		opts.PathScanMode = core.PathScanModeQuick
 	}
 	// 旧任务的 params 快照可能不含最新配置，覆盖为当前值（防旧 key 复活/丢失）。
 	opts.FofaKey = cfg.Fofa.APIKey

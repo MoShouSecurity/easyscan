@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -25,6 +26,43 @@ type leakRule struct {
 var builtinLeakDictionary []byte
 
 const builtinLeakRuleCount = 153737
+
+// quickLeakRules 保留最常见且高价值的敏感文件，作为默认扫描集合。
+var quickLeakRules = []leakRule{
+	{Path: "/.git/config", Type: "git", Sig: "[core]"},
+	{Path: "/.git/HEAD", Type: "git", Sig: "ref:"},
+	{Path: "/.gitignore", Type: "git"},
+	{Path: "/.svn/entries", Type: "svn", Sig: "dir"},
+	{Path: "/.svn/wc.db", Type: "svn"},
+	{Path: "/.env", Type: "env"},
+	{Path: "/.env.local", Type: "env"},
+	{Path: "/.DS_Store", Type: "ds_store"},
+	{Path: "/.idea/workspace.xml", Type: "idea", Sig: "project"},
+	{Path: "/.vscode/settings.json", Type: "vscode"},
+	{Path: "/.htaccess", Type: "htaccess"},
+	{Path: "/.htpasswd", Type: "htpasswd"},
+	{Path: "/WEB-INF/web.xml", Type: "java", Sig: "web-app"},
+	{Path: "/WEB-INF/classes/application.properties", Type: "java", Sig: "="},
+	{Path: "/phpinfo.php", Type: "phpinfo", Sig: "php version"},
+	{Path: "/info.php", Type: "phpinfo", Sig: "php version"},
+	{Path: "/composer.json", Type: "composer", Sig: "require"},
+	{Path: "/package.json", Type: "node", Sig: "\"name\""},
+	{Path: "/package-lock.json", Type: "node", Sig: "\"lockfileVersion\""},
+	{Path: "/docker-compose.yml", Type: "docker", Sig: "services:"},
+	{Path: "/Dockerfile", Type: "docker", Sig: "FROM"},
+	{Path: "/backup.zip", Type: "backup"},
+	{Path: "/backup.tar.gz", Type: "backup"},
+	{Path: "/backup.sql", Type: "backup"},
+	{Path: "/www.zip", Type: "backup"},
+	{Path: "/wwwroot.zip", Type: "backup"},
+	{Path: "/db.sql", Type: "backup"},
+	{Path: "/database.sql", Type: "backup"},
+	{Path: "/config.php.bak", Type: "backup"},
+	{Path: "/web.config", Type: "iis", Sig: "configuration"},
+	{Path: "/robots.txt", Type: "robots"},
+	{Path: "/crossdomain.xml", Type: "crossdomain", Sig: "cross-domain-policy"},
+	{Path: "/sitemap.xml", Type: "sitemap", Sig: "urlset"},
+}
 
 // loadLeakDict 从字典文件加载泄漏规则。格式：`路径 [类型] [响应签名]`。
 func loadLeakDict(path string) ([]leakRule, error) {
@@ -115,18 +153,26 @@ func inferLeakType(path string) string {
 
 // detectLeaks 对一个站点流式探测敏感文件，rules 为 nil 时使用内置压缩字典。
 func detectLeaks(ctx context.Context, site Site, taskID string, timeout time.Duration, concurrency int, rules []leakRule) ([]Leak, error) {
-	hits, err := scanPathSource(ctx, site, timeout, concurrency, leakProbeSource(rules), func(status int) bool {
-		return status == http.StatusOK
+	out := make([]Leak, 0)
+	err := detectLeaksEach(ctx, site, taskID, timeout, concurrency, leakProbeSource(rules), func(leak Leak) error {
+		out = append(out, leak)
+		return nil
 	})
-	if err != nil {
-		return nil, err
+	sort.Slice(out, func(i, j int) bool { return out[i].URL < out[j].URL })
+	return out, err
+}
+
+func detectLeaksEach(ctx context.Context, site Site, taskID string, timeout time.Duration, concurrency int, source pathProbeSource, onLeak func(Leak) error) error {
+	if onLeak == nil {
+		return fmt.Errorf("泄漏结果处理器为空")
 	}
-	out := make([]Leak, 0, len(hits))
-	for _, hit := range hits {
+	return scanPathSourceEach(ctx, site, timeout, concurrency, source, func(status int) bool {
+		return status == http.StatusOK
+	}, func(hit pathHit) error {
 		if hit.contentLength == 0 {
-			continue
+			return nil
 		}
-		out = append(out, Leak{
+		return onLeak(Leak{
 			ID:         newID(),
 			TaskID:     taskID,
 			URL:        hit.url,
@@ -135,8 +181,17 @@ func detectLeaks(ctx context.Context, site Site, taskID string, timeout time.Dur
 			StatusCode: hit.statusCode,
 			CreatedAt:  nowUnix(),
 		})
+	})
+}
+
+func leakProbeSourceForMode(rules []leakRule, mode string) (pathProbeSource, int) {
+	if rules != nil {
+		return limitPathProbeSource(leakProbeSource(rules), len(rules)), len(rules)
 	}
-	return out, nil
+	if normalizePathScanMode(mode) == PathScanModeDeep {
+		return limitPathProbeSource(leakProbeSource(nil), builtinLeakRuleCount), builtinLeakRuleCount
+	}
+	return limitPathProbeSource(leakProbeSource(quickLeakRules), len(quickLeakRules)), len(quickLeakRules)
 }
 
 func leakProbeSource(rules []leakRule) pathProbeSource {

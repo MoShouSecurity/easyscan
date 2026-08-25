@@ -214,7 +214,7 @@ func (s *Scheduler) run(t *Task) {
 		if r := recover(); r != nil {
 			t.Status = TaskFailed
 			t.FinishedAt = nowUnix()
-			t.Message = fmt.Sprintf("任务异常终止: %v", r)
+			t.Message = recoveredPanicError("任务调度器", r).Error()
 			_, _ = s.store.UpdateTaskIfStatus(t, TaskRunning)
 		}
 	}()

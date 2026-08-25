@@ -43,7 +43,22 @@ func newSiteScope(site Site) (siteScope, error) {
 }
 
 func (s siteScope) client(timeout time.Duration, maxRedirects int) *http.Client {
+	return s.clientWithConnectionLimit(timeout, maxRedirects, 16)
+}
+
+// clientWithConnectionLimit 创建连接数有上限、可复用空闲连接的同源客户端。
+func (s siteScope) clientWithConnectionLimit(timeout time.Duration, maxRedirects, maxConnections int) *http.Client {
+	if maxConnections < 1 {
+		maxConnections = 1
+	}
 	transport := &http.Transport{
+		MaxIdleConns:          maxConnections,
+		MaxIdleConnsPerHost:   maxConnections,
+		MaxConnsPerHost:       maxConnections,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   timeout,
+		ResponseHeaderTimeout: timeout,
+		ExpectContinueTimeout: time.Second,
 		// 扫描器需要兼容自签名和过期证书；连接仍由固定 IP 和主机范围约束保护。
 		TLSClientConfig: &tls.Config{
 			MinVersion:         tls.VersionTLS12,

@@ -24,8 +24,8 @@ Easy Scan 是一款**跨平台桌面资产侦察工具**——单二进制 + SQL
 - **站点截图**：chromedp 无头浏览器，启动前自动检查 macOS 屏幕录制权限
 
 ### 漏洞检测
-- **文件泄漏检测**：内置 153,737 条敏感文件候选（.git/.svn/.env/配置/备份/数据库/密钥），支持自定义类型与响应签名，并通过软 404 基线降低误报
-- **路径发现**：内置 3,378,432 条站内路径，按 `directory / route / file` 分类，识别 200/3xx/401/403 并过滤统一错误页
+- **文件泄漏检测**：默认快速扫描约 30,000 条敏感路径（高价值条目优先，再从完整字典均匀抽样）；深度模式可使用内置 153,737 条候选（.git/.svn/.env/配置/备份/数据库/密钥），支持自定义类型与响应签名，并通过软 404 基线降低误报
+- **路径发现**：默认快速扫描约 30,000 条站内路径（常见入口优先，再从完整字典均匀抽样）；深度模式可使用内置 3,378,432 条路径，按 `directory / route / file` 分类，识别 200/3xx/401/403 并过滤统一错误页
 - **nuclei POC 检测**：内置检测模板 + 支持官方 nuclei YAML 模板目录 + 一键下载官方模板库
 
 ### 桌面端 UI
@@ -111,6 +111,7 @@ go run ./cmd/easyscan -target example.com -ports top100
 # 参数: -type domain|ip  -ports test|top100|top1000|all
 #       -no-brute 关闭子域名爆破  -no-shot 关闭截图
 #       -file-leak [-leak-dict file]  -dir-scan [-dir-dict file]
+#       -path-mode quick|deep（默认 quick；deep 使用完整内置字典）
 #       -db 指定数据库路径  -shot-dir 截图目录
 ```
 
@@ -176,7 +177,7 @@ api_keys: {}                # 第三方数据源 Token
 
 内置字典合并自 [enh123/DirectoryFuzz](https://github.com/enh123/DirectoryFuzz) 的全部 26 个 TXT 字典（快照 `10941567fc72be4ab93831221eca79ac38fcc154`）、[maurosoria/dirsearch](https://github.com/maurosoria/dirsearch) v0.5.0 的全部 34 个 categories TXT 字典（快照 `6d685189ed7f3871ab02ca2ce9c3d326fa457b27`），以及 EasyScan 原有条目。dirsearch 的 `%EXT%` 模板按其默认值 `php,asp,aspx,jsp,html,htm` 展开。合并结果经过稳定排序、去重和分类后直接压缩；扫描阶段流式解压，不在启动时展开 337 万条记录。
 
-`paths.tsv.gz` 为 17 MiB，`leaks.tsv.gz` 为 693 KiB，均低于 GitHub 单文件 50 MiB 的目标，因此无需 Git LFS。完整内置扫描请求量很大，可通过 `directory.dict_path` 或 `-dir-dict` 指定精简字典。路径类型来自字典特征推断，用于结果筛选，不代表服务端一定以文件系统目录实现该 URL。
+`paths.tsv.gz` 为 17 MiB，`leaks.tsv.gz` 为 693 KiB，均低于 GitHub 单文件 50 MiB 的目标，因此无需 Git LFS。完整内置扫描请求量很大，因此桌面端和 CLI 默认使用高价值快速集合；只有显式选择深度模式（CLI 为 `-path-mode deep`）才使用完整字典。也可通过 `directory.dict_path` 或 `-dir-dict` 指定精简字典。路径类型来自字典特征推断，用于结果筛选，不代表服务端一定以文件系统目录实现该 URL。
 
 由于压缩字典包含 dirsearch 派生条目，[`core/dicts/paths.tsv.gz`](core/dicts/paths.tsv.gz) 与 [`core/dicts/leaks.tsv.gz`](core/dicts/leaks.tsv.gz) 按 dirsearch 的 `GPL-2.0-only` 许可证分发；EasyScan 自有代码仍使用项目根目录中的 MIT 许可证。
 
@@ -190,8 +191,8 @@ api_keys: {}                # 第三方数据源 Token
 | 端口 | `test`（6）/ `top100` / `top1000` / `all`（1-65535）/ `custom`（范围语法，如 `1-1000,8080`） |
 | 指纹 | 标题 / Server / 20+ CMS 与中间件特征 |
 | 截图 | chromedp 无头浏览器（默认开启） |
-| 泄漏 | 敏感文件压缩字典 + 自定义类型/签名 + 软 404 过滤 |
-| 路径 | 目录/路由/文件分类字典 + 自定义字典 + 软 404 过滤 |
+| 泄漏 | 默认约 3 万条（高价值条目优先 + 完整字典均匀抽样）；深度模式使用完整压缩字典；支持自定义类型/签名和软 404 过滤 |
+| 路径 | 默认约 3 万条（常见入口优先 + 完整字典均匀抽样）；深度模式使用完整目录/路由/文件分类字典；支持自定义字典和软 404 过滤 |
 | POC | 内置模板 + 官方 nuclei YAML 模板 |
 
 **提权说明**：ksubdomain 无状态爆破需要 root/管理员权限（原始 socket）。桌面端会自动弹系统授权框——macOS 管理员授权 / Linux PolicyKit / **Windows UAC（ShellExecuteExW runas）**。macOS/Linux 授权后利用 sudo timestamp 缓存，**短时间内重复扫描不重复弹框**（默认 5 分钟，可在 sudoers 的 `timestamp_timeout` 调整）；Windows 已是管理员则直接执行。用户取消授权则自动降级为纯 Go 字典爆破，不影响扫描。

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 )
@@ -27,6 +28,77 @@ var validPathKinds = map[string]bool{
 	"directory": true,
 	"route":     true,
 	"file":      true,
+}
+
+// quickDirectoryProbes 是快速模式优先探测的常见入口；随后从完整路径字典均匀补足 3 万条。
+var quickDirectoryProbes = []pathProbe{
+	{path: "/admin", kind: "directory"},
+	{path: "/administrator", kind: "directory"},
+	{path: "/manage", kind: "directory"},
+	{path: "/management", kind: "directory"},
+	{path: "/manager", kind: "directory"},
+	{path: "/manager/html", kind: "route"},
+	{path: "/console", kind: "route"},
+	{path: "/login", kind: "route"},
+	{path: "/signin", kind: "route"},
+	{path: "/register", kind: "route"},
+	{path: "/dashboard", kind: "route"},
+	{path: "/portal", kind: "directory"},
+	{path: "/api", kind: "route"},
+	{path: "/api/v1", kind: "route"},
+	{path: "/api/v2", kind: "route"},
+	{path: "/graphql", kind: "route"},
+	{path: "/graphiql", kind: "route"},
+	{path: "/swagger", kind: "directory"},
+	{path: "/swagger-ui", kind: "directory"},
+	{path: "/swagger-ui.html", kind: "file"},
+	{path: "/swagger/index.html", kind: "file"},
+	{path: "/api-docs", kind: "route"},
+	{path: "/v2/api-docs", kind: "route"},
+	{path: "/v3/api-docs", kind: "route"},
+	{path: "/openapi.json", kind: "file"},
+	{path: "/actuator", kind: "route"},
+	{path: "/actuator/health", kind: "route"},
+	{path: "/actuator/env", kind: "route"},
+	{path: "/actuator/mappings", kind: "route"},
+	{path: "/actuator/metrics", kind: "route"},
+	{path: "/health", kind: "route"},
+	{path: "/healthz", kind: "route"},
+	{path: "/status", kind: "route"},
+	{path: "/metrics", kind: "route"},
+	{path: "/debug", kind: "directory"},
+	{path: "/debug/pprof", kind: "route"},
+	{path: "/server-status", kind: "route"},
+	{path: "/server-info", kind: "route"},
+	{path: "/phpmyadmin", kind: "directory"},
+	{path: "/pma", kind: "directory"},
+	{path: "/wp-admin", kind: "directory"},
+	{path: "/wp-login.php", kind: "file"},
+	{path: "/jenkins", kind: "directory"},
+	{path: "/gitlab", kind: "directory"},
+	{path: "/jmx-console", kind: "route"},
+	{path: "/web-console", kind: "route"},
+	{path: "/solr", kind: "directory"},
+	{path: "/kibana", kind: "directory"},
+	{path: "/grafana", kind: "directory"},
+	{path: "/prometheus", kind: "directory"},
+	{path: "/uploads", kind: "directory"},
+	{path: "/upload", kind: "directory"},
+	{path: "/files", kind: "directory"},
+	{path: "/download", kind: "directory"},
+	{path: "/static", kind: "directory"},
+	{path: "/assets", kind: "directory"},
+	{path: "/public", kind: "directory"},
+	{path: "/backup", kind: "directory"},
+	{path: "/backups", kind: "directory"},
+	{path: "/config", kind: "directory"},
+	{path: "/docs", kind: "directory"},
+	{path: "/test", kind: "directory"},
+	{path: "/dev", kind: "directory"},
+	{path: "/robots.txt", kind: "file"},
+	{path: "/sitemap.xml", kind: "file"},
+	{path: "/security.txt", kind: "file"},
+	{path: "/.well-known/security.txt", kind: "file"},
 }
 
 // loadDirectoryDict 加载自定义路径发现字典。格式为 `路径 [directory|route|file]`。
@@ -86,6 +158,19 @@ func loadDirectoryDict(filePath string) ([]pathProbe, error) {
 }
 
 func detectDirectories(ctx context.Context, site Site, taskID string, timeout time.Duration, concurrency int, probes []pathProbe) ([]DirectoryResult, error) {
+	results := make([]DirectoryResult, 0)
+	err := detectDirectoriesEach(ctx, site, taskID, timeout, concurrency, directoryProbeSource(probes), func(result DirectoryResult) error {
+		results = append(results, result)
+		return nil
+	})
+	sort.Slice(results, func(i, j int) bool { return results[i].URL < results[j].URL })
+	return results, err
+}
+
+func detectDirectoriesEach(ctx context.Context, site Site, taskID string, timeout time.Duration, concurrency int, source pathProbeSource, onResult func(DirectoryResult) error) error {
+	if onResult == nil {
+		return fmt.Errorf("路径结果处理器为空")
+	}
 	accept := func(status int) bool {
 		switch status {
 		case http.StatusOK, http.StatusNoContent,
@@ -96,13 +181,8 @@ func detectDirectories(ctx context.Context, site Site, taskID string, timeout ti
 			return false
 		}
 	}
-	hits, err := scanPathSource(ctx, site, timeout, concurrency, directoryProbeSource(probes), accept)
-	if err != nil {
-		return nil, err
-	}
-	results := make([]DirectoryResult, 0, len(hits))
-	for _, hit := range hits {
-		results = append(results, DirectoryResult{
+	return scanPathSourceEach(ctx, site, timeout, concurrency, source, accept, func(hit pathHit) error {
+		return onResult(DirectoryResult{
 			ID:            newID(),
 			TaskID:        taskID,
 			URL:           hit.url,
@@ -113,8 +193,22 @@ func detectDirectories(ctx context.Context, site Site, taskID string, timeout ti
 			ContentType:   hit.contentType,
 			CreatedAt:     nowUnix(),
 		})
+	})
+}
+
+func directoryProbeSourceForMode(probes []pathProbe, mode string) (pathProbeSource, int) {
+	if probes != nil {
+		return limitPathProbeSource(directoryProbeSource(probes), len(probes)), len(probes)
 	}
-	return results, nil
+	if normalizePathScanMode(mode) == PathScanModeDeep {
+		return limitPathProbeSource(directoryProbeSource(nil), builtinPathCount), builtinPathCount
+	}
+	return prioritizedSamplePathProbeSource(
+		directoryProbeSource(quickDirectoryProbes),
+		directoryProbeSource(nil),
+		builtinPathCount,
+		quickPathProbeBudget,
+	), quickPathProbeBudget
 }
 
 // directoryProbeSource 中 probes 为 nil 时流式解压内置字典；非 nil 时使用自定义字典。

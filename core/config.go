@@ -12,6 +12,8 @@ import (
 const (
 	MaxScanConcurrency = 2000
 	MaxScanTimeoutSec  = 300
+	PathScanModeQuick  = "quick"
+	PathScanModeDeep   = "deep"
 )
 
 // ScanOptions 描述一次侦察任务的策略参数。
@@ -30,6 +32,8 @@ type ScanOptions struct {
 	FileLeak bool `json:"file_leak"`
 	// DirectoryScan 是否执行 Web 路径发现。字段名为兼容旧版保留。
 	DirectoryScan bool `json:"directory_scan"`
+	// PathScanMode 路径扫描强度：quick 每类约 3 万条，deep 使用完整内置字典。
+	PathScanMode string `json:"path_scan_mode"`
 	// Screenshot 是否对站点首页截图。
 	Screenshot bool `json:"screenshot"`
 	// ScreenshotDir 截图保存目录。
@@ -65,10 +69,28 @@ func DefaultScanOptions() ScanOptions {
 		SubdomainBrute: true,
 		Nuclei:         false,
 		FileLeak:       false,
+		PathScanMode:   PathScanModeQuick,
 		Screenshot:     true,
 		Concurrency:    100,
 		Timeout:        5 * time.Second,
 	}
+}
+
+// ValidatePathScanMode 校验路径扫描强度。空值仅用于兼容旧任务，由执行层按 quick 处理。
+func ValidatePathScanMode(mode string) error {
+	switch mode {
+	case PathScanModeQuick, PathScanModeDeep:
+		return nil
+	default:
+		return fmt.Errorf("路径扫描强度仅支持 %q 或 %q", PathScanModeQuick, PathScanModeDeep)
+	}
+}
+
+func normalizePathScanMode(mode string) string {
+	if mode == "" {
+		return PathScanModeQuick
+	}
+	return mode
 }
 
 // Config 全局配置文件结构（config.yaml）。

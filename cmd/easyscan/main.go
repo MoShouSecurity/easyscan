@@ -30,12 +30,17 @@ func main() {
 		leakDict = flag.String("leak-dict", "", "文件泄漏字典文件（每行：路径 [类型]）")
 		dirScan  = flag.Bool("dir-scan", false, "开启 Web 路径发现（目录/路由/文件）")
 		dirDict  = flag.String("dir-dict", "", "路径发现字典文件（路径后可附类型）")
+		pathMode = flag.String("path-mode", core.PathScanModeQuick, "路径扫描强度: quick / deep")
 	)
 	flag.Parse()
 
 	if *target == "" {
 		fmt.Fprintln(os.Stderr, "用法: easyscan -target example.com [-type domain] [-ports top100]")
 		flag.Usage()
+		os.Exit(2)
+	}
+	if err := core.ValidatePathScanMode(*pathMode); err != nil {
+		fmt.Fprintf(os.Stderr, "路径扫描强度无效: %v\n", err)
 		os.Exit(2)
 	}
 
@@ -78,6 +83,7 @@ func main() {
 	opts.LeakDictPath = *leakDict
 	opts.DirectoryScan = *dirScan
 	opts.DirectoryDictPath = *dirDict
+	opts.PathScanMode = *pathMode
 
 	engine := core.NewEngine(store, opts)
 	ctx := context.Background()

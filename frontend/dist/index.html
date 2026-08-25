@@ -28,13 +28,15 @@
   button.primary:hover { filter: brightness(1.08); }
   button.danger { background: var(--panel-2); color: var(--err); padding: 7px 14px; border: 1px solid var(--err); }
 
-  /* 内容区 */
-  .content { flex: 1; overflow-y: auto; padding: 18px; }
+  /* 内容区：flex 纵向布局，列表容器撑满剩余高度 */
+  .content { flex: 1; overflow-y: hidden; padding: 18px; display: flex; flex-direction: column; }
   .section-title { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; margin: 22px 0 10px; display: flex; align-items: center; gap: 8px; }
   .section-title:first-child { margin-top: 0; }
   .count { background: var(--panel-2); color: var(--accent); padding: 1px 8px; border-radius: 10px; font-size: 11px; }
-  /* 列表/表格容器：最多 50 条一屏，超出出垂直滚动条 */
-  .tbl-wrap { max-height: 55vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
+  /* 列表/表格容器：铺满剩余高度（flex:1），超出部分出垂直滚动条 */
+  .tbl-wrap { flex: 1; min-height: 0; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
+  /* 详情页 tab 内容区：把 flex 余量传给内部 tbl-wrap */
+  #detailTabContent { flex: 1; min-height: 0; display: flex; flex-direction: column; }
   /* 可点击 URL：统一样式（下划线 hover 提示） */
   .url-link { cursor: pointer; color: var(--accent); }
   .url-link:hover { text-decoration: underline; }
@@ -61,7 +63,7 @@
   .bar { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; min-width: 90px; }
   .bar > div { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width .4s; }
   .tag { color: var(--accent-2); }
-  .empty { color: var(--muted); text-align: center; padding: 40px; }
+  .empty { color: var(--muted); text-align: center; padding: 40px; display: flex; align-items: center; justify-content: center; flex: 1; }
 
   /* 详情页标签页 */
   .tabs { display: flex; gap: 4px; margin-bottom: 16px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }

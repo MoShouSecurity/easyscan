@@ -375,6 +375,8 @@ async function openDetail(taskID) {
 
 async function renderDetail(taskID) {
   const v = document.getElementById('view');
+  // 保留表格滚动位置（运行中每 5s 重拉时避免跳动回顶部）。
+  const prevScroll = document.querySelector('#detailTabContent .tbl-wrap')?.scrollTop || 0;
   let task, sites, ports, leaks, directories, subs, ips;
   try {
     [task, sites, ports, leaks, directories, subs, ips] = await Promise.all([
@@ -429,6 +431,11 @@ async function renderDetail(taskID) {
     if (shot) openLightbox(shot.getAttribute('data-shot'));
   };
   switchDetailTab(currentDetailTab);
+  // 恢复滚动位置（tbl-wrap 被重建，需在渲染完成后一次性设置）。
+  if (prevScroll > 0) {
+    const w = document.querySelector('#detailTabContent .tbl-wrap');
+    if (w) w.scrollTop = prevScroll;
+  }
 }
 
 function renderSitesHTML(sites) {
@@ -761,15 +768,27 @@ async function exportCurrent() {
 }
 
 /* ---------- 轮询 ---------- */
+let detailTick = 0;
 async function poll() {
-  if (state.view === 'home') { renderHome(); }
-  else if (state.view === 'detail' && state.taskID) {
-    const t = await go.GetTask(state.taskID).catch(()=>null);
-    if (t && t.status !== state.lastStatus) {
+  if (state.view === 'home') { renderHome(); return; }
+  if (state.view !== 'detail' || !state.taskID) return;
+  if (state.detailRendering) return; // 防重入：上一次渲染未完成不叠加
+  const t = await go.GetTask(state.taskID).catch(()=>null);
+  if (!t) { renderHome(); return; } // 任务被删除则回首页
+  state.detailRendering = true;
+  try {
+    if (t.status !== state.lastStatus) {
+      // 状态翻转（running→finished 等）：立即刷新一次，tick 归零。
       state.lastStatus = t.status;
-      renderDetail(state.taskID);
+      detailTick = 0;
+      await renderDetail(state.taskID);
+      return;
     }
-  }
+    if (t.status === 'running' && ++detailTick % 2 === 0) {
+      // running 期间每 2 tick（约 5s）重拉一次，实时展现新入库资产。
+      await renderDetail(state.taskID);
+    }
+  } finally { state.detailRendering = false; }
 }
 
 function cancelClose() {

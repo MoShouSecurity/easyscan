@@ -531,6 +531,9 @@ func mapToSites(siteMap map[string]Site) []Site {
 }
 
 // postProcess 执行文件泄漏、路径发现、POC 和截图等附加模块。base 为起始进度（百分比）。
+// postSiteConcurrency postProcess 站点级并发度（泄漏/目录模块，单站内另有 50 并发）。
+const postSiteConcurrency = 4
+
 func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, report ProgressFunc, base int) error {
 	if len(sites) == 0 {
 		return nil
@@ -562,19 +565,46 @@ func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, r
 			leakModeLabel = "自定义字典"
 		}
 		report("文件泄漏检测", fmt.Sprintf("%s：探测 %d 个站点，每站路径预算 %d 条", leakModeLabel, len(sites), requestBudget), pct)
-		for index, site := range sites {
-			saved := 0
-			err := detectLeaksEach(ctx, site, taskID, e.opts.Timeout, e.opts.Concurrency, source, func(leak Leak) error {
-				if err := e.store.UpsertLeak(leak); err != nil {
-					return fmt.Errorf("保存泄漏结果 %s: %w", leak.URL, err)
+		// 站点级并发（sem=4）：单站内 50 并发 worker 池保持不变；
+		// 首个站点错误经 errOnce 温和中止（已启动站点跑完）。
+		sem := make(chan struct{}, postSiteConcurrency)
+		var wg sync.WaitGroup
+		var firstErr error
+		var errOnce sync.Once
+		var done int32
+		for _, site := range sites {
+			site := site
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					return
 				}
-				saved++
-				return nil
-			})
-			if err != nil {
-				return fmt.Errorf("文件泄漏检测 %s: %w", site.URL, err)
-			}
-			report("文件泄漏检测", fmt.Sprintf("[%d/%d] %s，命中 %d 条", index+1, len(sites), site.URL, saved), pct)
+				defer func() { <-sem }()
+				saved := 0
+				err := detectLeaksEach(ctx, site, taskID, e.opts.Timeout, e.opts.Concurrency, source, func(leak Leak) error {
+					if err := e.store.UpsertLeak(leak); err != nil {
+						return fmt.Errorf("保存泄漏结果 %s: %w", leak.URL, err)
+					}
+					saved++
+					return nil
+				})
+				if err != nil {
+					errOnce.Do(func() { firstErr = fmt.Errorf("文件泄漏检测 %s: %w", site.URL, err) })
+					return
+				}
+				n := atomic.AddInt32(&done, 1)
+				report("文件泄漏检测", fmt.Sprintf("[%d/%d] %s，命中 %d 条", n, len(sites), site.URL, saved), pct)
+			}()
+		}
+		wg.Wait()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if firstErr != nil {
+			return firstErr
 		}
 		pct += 3
 		report("文件泄漏检测", "完成", pct)
@@ -595,22 +625,45 @@ func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, r
 			directoryModeLabel = "自定义字典"
 		}
 		report("路径发现", fmt.Sprintf("%s：探测 %d 个站点，每站路径预算 %d 条", directoryModeLabel, len(sites), requestBudget), pct)
-		for index, site := range sites {
-			saved := 0
-			err := detectDirectoriesEach(ctx, site, taskID, e.opts.Timeout, e.opts.Concurrency, source, func(result DirectoryResult) error {
-				if err := e.store.UpsertDirectory(result); err != nil {
-					return fmt.Errorf("保存路径结果 %s: %w", result.URL, err)
+		// 站点级并发（sem=4，同文件泄漏）：单站内 worker 池不变。
+		sem := make(chan struct{}, postSiteConcurrency)
+		var wg sync.WaitGroup
+		var firstErr error
+		var errOnce sync.Once
+		var done int32
+		for _, site := range sites {
+			site := site
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				select {
+				case sem <- struct{}{}:
+				case <-ctx.Done():
+					return
 				}
-				saved++
-				return nil
-			})
-			if err != nil {
-				return fmt.Errorf("路径发现 %s: %w", site.URL, err)
-			}
-			report("路径发现", fmt.Sprintf("[%d/%d] %s，命中 %d 条", index+1, len(sites), site.URL, saved), pct)
-			if err := ctx.Err(); err != nil {
-				return err
-			}
+				defer func() { <-sem }()
+				saved := 0
+				err := detectDirectoriesEach(ctx, site, taskID, e.opts.Timeout, e.opts.Concurrency, source, func(result DirectoryResult) error {
+					if err := e.store.UpsertDirectory(result); err != nil {
+						return fmt.Errorf("保存路径结果 %s: %w", result.URL, err)
+					}
+					saved++
+					return nil
+				})
+				if err != nil {
+					errOnce.Do(func() { firstErr = fmt.Errorf("路径发现 %s: %w", site.URL, err) })
+					return
+				}
+				n := atomic.AddInt32(&done, 1)
+				report("路径发现", fmt.Sprintf("[%d/%d] %s，命中 %d 条", n, len(sites), site.URL, saved), pct)
+			}()
+		}
+		wg.Wait()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if firstErr != nil {
+			return firstErr
 		}
 		pct += 3
 		report("路径发现", "完成", pct)

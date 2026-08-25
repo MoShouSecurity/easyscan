@@ -403,81 +403,140 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 		}
 	}
 
-	// 2. nmap 端口扫描 + 服务/版本识别。
+	// 2. nmap 端口扫描 + 服务/版本识别（存活 IP 分批，进度按批推进；
+	// 单批失败该批降级纯 Go，其余批继续 nmap）。
 	if nmap.Available() {
-		report("端口扫描", fmt.Sprintf("nmap 服务识别 %d 个存活 IP (模式: %s) ...", len(alive), e.opts.PortMode), base+span/10)
-		scanTargets := alive
-		if e.opts.NoPing && len(nmapTargets) > 0 {
-			// 禁 ping 时保留原始 CIDR，避免把 /16 展开成数万个命令行目标。
-			scanTargets = nmapTargets
-		}
-		hosts, err := nmap.Scan(ctx, scanTargets, e.opts.PortMode, e.opts.PortSpec)
-		if err == nil {
-			var resMu sync.Mutex
-			if err := e.processNmapBatch(ctx, hosts, ipHosts, taskID, siteMap, recordAlive, &resMu); err != nil {
-				return nil, err
+		batches := chunkIPs(alive, nmapBatchSize)
+		var pureGoIPs []string
+		var resMu sync.Mutex
+		syn := false
+		for bi, batch := range batches {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
 			}
-			mode := "TCP connect"
+			report("端口扫描",
+				fmt.Sprintf("nmap 服务识别 批次 %d/%d（%d 个 IP, 模式: %s）...", bi+1, len(batches), len(batch), e.opts.PortMode),
+				base+span/10)
+			hosts, err := nmap.Scan(ctx, batch, e.opts.PortMode, e.opts.PortSpec)
+			if err != nil {
+				report("端口扫描", fmt.Sprintf("nmap 批次 %d/%d 失败，该批降级纯 Go: %s", bi+1, len(batches), err.Error()), base+span/10)
+				pureGoIPs = append(pureGoIPs, batch...)
+				continue
+			}
 			for _, h := range hosts {
 				if h.Syn {
-					mode = "SYN 半开"
+					syn = true
 					break
 				}
 			}
-			report("端口扫描", fmt.Sprintf("nmap %s 扫描完成，识别 %d 个 IP", mode, len(hosts)), base+span)
-			return mapToSites(siteMap), nil
-		}
-		report("端口扫描", "nmap 扫描失败，降级纯 Go 扫描: "+err.Error(), base+span/10)
-	}
-
-	// 3. 纯 Go fallback。
-	ports := portList(e.opts.PortMode, e.opts.PortSpec)
-	for i, ip := range alive {
-		hostname := ""
-		if ipHosts != nil {
-			if hs := ipHosts[ip]; len(hs) > 0 {
-				hostname = hs[0]
-			}
-		}
-		open := scanIPPorts(ctx, ip, ports, e.opts.Concurrency, e.opts.Timeout)
-		if len(open) > 0 {
-			if err := recordAlive(ip); err != nil {
+			if err := e.processNmapBatch(ctx, hosts, ipHosts, taskID, siteMap, recordAlive, &resMu); err != nil {
 				return nil, err
 			}
+			// 进度按批单调推进（nmap 阶段 base+span/10 → base+span*9/10）。
+			pct := base + span/10 + (span*4/5)*(bi+1)/len(batches)
+			report("端口扫描", fmt.Sprintf("nmap 批次 %d/%d 完成", bi+1, len(batches)), pct)
 		}
-		for _, p := range open {
-			service, banner := grabBanner(ctx, ip, p, e.opts.Timeout)
-			rec := Port{
-				ID:         newID(),
-				IP:         ip,
-				Port:       p,
-				Protocol:   "tcp",
-				Service:    service,
-				Banner:     strings.TrimSpace(banner),
-				Confidence: ConfidencePureGo,
-				TaskID:     taskID,
-				CreatedAt:  nowUnix(),
-			}
-			if site, ok := probeWebSite(ctx, ip, p, service, hostname, e.opts.Timeout); ok {
-				site.TaskID = taskID
-				rec.Title = site.Title
-				siteMap[site.URL] = site
-				if err := e.store.UpsertSite(site); err != nil {
-					return nil, fmt.Errorf("保存站点 %s: %w", site.URL, err)
+		// 失败批的纯 Go 兜底（复用同套处理，进度推进到 base+span）。
+		if len(pureGoIPs) > 0 {
+			ports := portList(e.opts.PortMode, e.opts.PortSpec)
+			report("端口扫描", fmt.Sprintf("纯 Go 兜底 %d 个 IP ...", len(pureGoIPs)), base+span*9/10)
+			for i, ip := range pureGoIPs {
+				open, err := e.processPureGoIP(ctx, ip, ipHosts, taskID, siteMap, recordAlive, ports)
+				if err != nil {
+					return nil, err
 				}
+				pct := base + span*9/10 + span*(i+1)/len(pureGoIPs)/10
+				if pct > base+span {
+					pct = base + span
+				}
+				report("端口扫描", fmt.Sprintf("[%d/%d] %s 开放 %d 端口", i+1, len(pureGoIPs), ip, open), pct)
 			}
-			if err := e.store.UpsertPort(rec); err != nil {
-				return nil, fmt.Errorf("保存端口 %s:%d: %w", rec.IP, rec.Port, err)
-			}
+		}
+		mode := "TCP connect"
+		if syn {
+			mode = "SYN 半开"
+		}
+		report("端口扫描", fmt.Sprintf("nmap %s 扫描完成（%d 批）", mode, len(batches)), base+span)
+		return mapToSites(siteMap), nil
+	}
+
+	// 3. 纯 Go fallback（nmap 不可用：逐 IP 扫描，进度线性推进）。
+	ports := portList(e.opts.PortMode, e.opts.PortSpec)
+	for i, ip := range alive {
+		open, err := e.processPureGoIP(ctx, ip, ipHosts, taskID, siteMap, recordAlive, ports)
+		if err != nil {
+			return nil, err
 		}
 		pct := base
 		if len(alive) > 0 {
 			pct = base + (i+1)*span/len(alive)
 		}
-		report("端口扫描", fmt.Sprintf("[%d/%d] %s 开放 %d 端口", i+1, len(alive), ip, len(open)), pct)
+		report("端口扫描", fmt.Sprintf("[%d/%d] %s 开放 %d 端口", i+1, len(alive), ip, open), pct)
 	}
 
 	return mapToSites(siteMap), nil
+}
+
+// processPureGoIP 纯 Go 扫描单个 IP（端口扫描 + banner + Web 指纹 + 落库），
+// 返回开放端口数。供无 nmap 整体兜底与 nmap 单批失败兜底两处复用。
+func (e *Engine) processPureGoIP(ctx context.Context, ip string, ipHosts map[string][]string, taskID string, siteMap map[string]Site, recordAlive func(string) error, ports []int) (int, error) {
+	hostname := ""
+	if ipHosts != nil {
+		if hs := ipHosts[ip]; len(hs) > 0 {
+			hostname = hs[0]
+		}
+	}
+	open := scanIPPorts(ctx, ip, ports, e.opts.Concurrency, e.opts.Timeout)
+	if len(open) > 0 {
+		if err := recordAlive(ip); err != nil {
+			return 0, err
+		}
+	}
+	for _, p := range open {
+		service, banner := grabBanner(ctx, ip, p, e.opts.Timeout)
+		rec := Port{
+			ID:         newID(),
+			IP:         ip,
+			Port:       p,
+			Protocol:   "tcp",
+			Service:    service,
+			Banner:     strings.TrimSpace(banner),
+			Confidence: ConfidencePureGo,
+			TaskID:     taskID,
+			CreatedAt:  nowUnix(),
+		}
+		if site, ok := probeWebSite(ctx, ip, p, service, hostname, e.opts.Timeout); ok {
+			site.TaskID = taskID
+			rec.Title = site.Title
+			siteMap[site.URL] = site
+			if err := e.store.UpsertSite(site); err != nil {
+				return 0, fmt.Errorf("保存站点 %s: %w", site.URL, err)
+			}
+		}
+		if err := e.store.UpsertPort(rec); err != nil {
+			return 0, fmt.Errorf("保存端口 %s:%d: %w", rec.IP, rec.Port, err)
+		}
+	}
+	return len(open), nil
+}
+
+// nmapBatchSize nmap 目标分批大小（< maxNmapArgTargets 1024，不触发 -iL）。
+const nmapBatchSize = 256
+
+// chunkIPs 顺序切分 IP 列表为 size 大小的批次（不改变集合内容与顺序）。
+func chunkIPs(ips []string, size int) [][]string {
+	if size <= 0 {
+		size = nmapBatchSize
+	}
+	var out [][]string
+	for i := 0; i < len(ips); i += size {
+		end := i + size
+		if end > len(ips) {
+			end = len(ips)
+		}
+		out = append(out, ips[i:end])
+	}
+	return out
 }
 
 func mapToSites(siteMap map[string]Site) []Site {

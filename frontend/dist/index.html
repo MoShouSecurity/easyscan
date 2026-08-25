@@ -80,6 +80,18 @@
   /* 模态框 */
   .modal-mask { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none; align-items: center; justify-content: center; z-index: 100; }
   .modal-mask.show { display: flex; }
+  /* 截图放大悬浮层（Lightbox）：点击缩略图展示，ESC/遮罩/关闭按钮关闭 */
+  .lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.82); display: none;
+    align-items: center; justify-content: center; z-index: 200; cursor: zoom-out; }
+  .lightbox.show { display: flex; }
+  .lightbox img { max-width: 92vw; max-height: 88vh; object-fit: contain; cursor: default;
+    border-radius: 4px; box-shadow: 0 8px 40px rgba(0,0,0,.6); }
+  .lightbox .lb-info { position: absolute; bottom: 18px; left: 0; right: 0; text-align: center;
+    color: var(--muted); font-size: 12px; padding: 0 24px; word-break: break-all; }
+  .lightbox .lb-close { position: absolute; top: 14px; right: 20px; color: #ccc; font-size: 26px;
+    line-height: 1; cursor: pointer; user-select: none; }
+  .lightbox .lb-close:hover { color: #fff; }
+  .site-card .thumb { cursor: zoom-in; }
   .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; width: 460px; max-width: 92vw; padding: 20px; box-shadow: 0 20px 60px rgba(0,0,0,.5); }
   .modal h2 { font-size: 16px; margin-bottom: 16px; }
   label { display: block; color: var(--muted); margin: 12px 0 4px; font-size: 12px; }
@@ -385,10 +397,12 @@ async function renderDetail(taskID) {
   <div id="detailTabContent"></div>`;
 
   v.innerHTML = html;
-  // 事件委托：打开站点 URL。避免内联 onclick 的属性→JS 上下文混淆（DOM XSS 防线）。
+  // 事件委托：打开站点 URL / 放大截图。避免内联 onclick 的属性→JS 上下文混淆（DOM XSS 防线）。
   v.onclick = (e) => {
     const el = e.target.closest('[data-url]');
-    if (el) openURL(el.getAttribute('data-url'));
+    if (el) { openURL(el.getAttribute('data-url')); return; }
+    const shot = e.target.closest('[data-shot]');
+    if (shot) openLightbox(shot.getAttribute('data-shot'));
   };
   switchDetailTab(currentDetailTab);
 }
@@ -399,7 +413,7 @@ function renderSitesHTML(sites) {
   // 内联 onclick 中 esc 转义的引号会被浏览器实体解码还原，可闭合 JS 字符串注入（DOM XSS）。
   return '<div class="site-grid">' + sites.map(s => `
     <div class="site-card">
-      <div class="thumb" id="thumb-${esc(s.id)}"><span class="ph">无截图</span></div>
+      <div class="thumb" id="thumb-${esc(s.id)}" ${s.screenshot ? `data-shot="${esc(s.id)}" title="点击放大截图"` : ''}><span class="ph">无截图</span></div>
       <div class="meta">
         <div class="url" style="cursor:pointer" title="点击用浏览器打开" data-url="${esc(s.url)}">${esc(s.url)}</div>
         <div class="title">${esc(s.title) || '（无标题）'}</div>
@@ -745,8 +759,53 @@ window.runtime.EventsOn("close:confirm", () => {
   document.getElementById('closeModal').classList.add('show');
 });
 
+/* ---------- 截图放大悬浮层（Lightbox） ---------- */
+let currentShotSiteID = null;
+async function openLightbox(siteID) {
+  const site = (currentSites || []).find(s => s.id === siteID);
+  if (!site || !site.screenshot) return;
+  document.getElementById('lightbox').classList.add('show');
+  currentShotSiteID = siteID;
+  const info = (site.url || '') + (site.title ? ' · ' + site.title : '') +
+    (site.fingerprint ? ' · ' + site.fingerprint : '') +
+    (site.status_code ? ' · HTTP ' + site.status_code : '');
+  try {
+    // 未缓存则先拉取（复用 shotCache，关闭后重开秒开）。
+    if (!shotCache[site.screenshot]) {
+      shotCache[site.screenshot] = await go.GetScreenshot(site.screenshot);
+    }
+    document.getElementById('lbImg').src = 'data:image/png;base64,' + shotCache[site.screenshot];
+    document.getElementById('lbInfo').textContent = info;
+  } catch(e) {
+    document.getElementById('lbInfo').textContent = '加载截图失败: ' + e;
+    toast('加载截图失败: ' + e, true);
+  }
+}
+function closeLightbox() {
+  document.getElementById('lightbox').classList.remove('show');
+  currentShotSiteID = null;
+}
+// 右上关闭按钮 + 遮罩点击（仅点遮罩本身，图片/信息栏不触发）。
+document.getElementById('lbClose').addEventListener('click', closeLightbox);
+document.getElementById('lightbox').addEventListener('click', (e) => {
+  if (e.target.id === 'lightbox') closeLightbox();
+});
+// ESC 关闭（一次性注册标记，防重复监听）。
+if (!window.__lbKbBound) {
+  window.__lbKbBound = true;
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && currentShotSiteID) closeLightbox();
+  });
+}
+
 renderHome();
 setInterval(poll, 2500);
 </script>
+<!-- 截图放大悬浮层：点击缩略图展示，ESC/遮罩/关闭按钮关闭 -->
+<div class="lightbox" id="lightbox">
+  <div class="lb-close" id="lbClose">×</div>
+  <img id="lbImg" alt="站点截图" />
+  <div class="lb-info" id="lbInfo"></div>
+</div>
 </body>
 </html>

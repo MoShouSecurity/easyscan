@@ -35,6 +35,9 @@
   .count { background: var(--panel-2); color: var(--accent); padding: 1px 8px; border-radius: 10px; font-size: 11px; }
   /* 列表/表格容器：最多 50 条一屏，超出出垂直滚动条 */
   .tbl-wrap { max-height: 55vh; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
+  /* 可点击 URL：统一样式（下划线 hover 提示） */
+  .url-link { cursor: pointer; color: var(--accent); }
+  .url-link:hover { text-decoration: underline; }
 
   /* 表格 */
   table { width: 100%; border-collapse: collapse; }
@@ -342,13 +345,20 @@ async function doSearch() {
   let results;
   try { results = await go.Search(q); } catch(e) { results = []; }
   const typeName = { domain:'根域名', subdomain:'子域名', ip:'IP', port:'端口', site:'站点', leak:'泄露' };
+  // site/leak 类型的值域是完整 URL，可点击打开浏览器（域名/IP 无 scheme 不拼凑）
+  const isURLType = (t) => t === 'site' || t === 'leak';
   v.innerHTML = `<div class="section-title">搜索 “${esc(q)}” <span class="count">${results.length} 条结果</span></div>` +
     (results.length ? `<div class="tbl-wrap"><table><thead><tr><th>类型</th><th>值</th><th>详情</th></tr></thead><tbody>` +
     results.map(r => `<tr>
       <td><span class="badge">${typeName[r.type]||r.type}</span></td>
-      <td class="target">${esc(r.value)}</td>
+      <td class="${isURLType(r.type) ? 'url-link' : 'target'}">${isURLType(r.type) ? `title="点击用浏览器打开" data-url="${esc(r.value)}"` : ''}${esc(r.value)}</td>
       <td style="color:var(--muted)">${esc(r.detail)}</td>
     </tr>`).join('') + '</tbody></table></div>' : '<div class="empty">未找到匹配资产</div>');
+  // 事件委托：URL 点击打开浏览器（与详情页同模式，防内联 onclick XSS）
+  v.onclick = (e) => {
+    const el = e.target.closest('[data-url]');
+    if (el) openURL(el.getAttribute('data-url'));
+  };
 }
 
 /* ---------- 详情页 ---------- */
@@ -465,13 +475,13 @@ function renderPortsHTML(ports) {
 function renderLeaksHTML(leaks) {
   if (!leaks.length) return '<div class="empty">未发现敏感信息泄露</div>';
   return `<table><thead><tr><th>URL</th><th>类型</th><th>路径</th><th>状态码</th></tr></thead><tbody>` +
-    leaks.map(l => `<tr><td class="target">${esc(l.url)}</td><td><span class="badge" style="background:rgba(238,72,99,.15);color:var(--err)">${esc(l.type)}</span></td><td style="color:var(--muted)">${esc(l.path)}</td><td>${l.status_code}</td></tr>`).join('') + '</tbody></table>';
+    leaks.map(l => `<tr><td class="url-link" title="点击用浏览器打开" data-url="${esc(l.url)}">${esc(l.url)}</td><td><span class="badge" style="background:rgba(238,72,99,.15);color:var(--err)">${esc(l.type)}</span></td><td style="color:var(--muted)">${esc(l.path)}</td><td>${l.status_code}</td></tr>`).join('') + '</tbody></table>';
 }
 
 function renderDirectoriesHTML(directories) {
   if (!directories.length) return '<div class="empty">未发现有效路径</div>';
   return `<table><thead><tr><th>URL</th><th>路径</th><th>类型</th><th>状态码</th><th>响应长度</th><th>内容类型</th></tr></thead><tbody>` +
-    directories.map(d => `<tr><td class="target" data-url="${esc(d.url)}" style="cursor:pointer">${esc(d.url)}</td><td style="color:var(--muted)">${esc(d.path)}</td><td><span class="badge badge-dim">${esc(d.kind || 'route')}</span></td><td>${d.status_code}</td><td>${d.content_length}</td><td>${esc(d.content_type) || '-'}</td></tr>`).join('') + '</tbody></table>';
+    directories.map(d => `<tr><td class="url-link" title="点击用浏览器打开" data-url="${esc(d.url)}">${esc(d.url)}</td><td style="color:var(--muted)">${esc(d.path)}</td><td><span class="badge badge-dim">${esc(d.kind || 'route')}</span></td><td>${d.status_code}</td><td>${d.content_length}</td><td>${esc(d.content_type) || '-'}</td></tr>`).join('') + '</tbody></table>';
 }
 
 function switchDetailTab(key) {

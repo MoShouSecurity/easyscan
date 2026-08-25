@@ -120,7 +120,7 @@ func (a *App) hasRunningTasks() bool {
 	if a.store == nil {
 		return false
 	}
-	tasks, err := a.store.ListTasks(200)
+	tasks, err := a.store.ListTasks(200, 0)
 	if err != nil {
 		return false
 	}
@@ -226,12 +226,12 @@ func (a *App) StartScan(req ScanRequest) (string, error) {
 
 // ---- 任务 ----
 
-func (a *App) ListTasks() ([]core.Task, error) {
+func (a *App) ListTasks(page int) ([]core.Task, error) {
 	if a.store == nil {
 		return nil, fmt.Errorf("存储未初始化")
 	}
-	// 每页最多 50 条（UI 表格容器带垂直滚动条查看）
-	return a.store.ListTasks(50)
+	// 每页 50，多取 1 条供前端判断 hasMore。
+	return a.store.ListTasks(51, page*50)
 }
 
 func (a *App) GetTask(id string) (core.Task, error) {
@@ -352,56 +352,57 @@ func (a *App) ListSites() ([]core.Site, error) {
 
 // ---- 任务详情查询 ----
 
-func (a *App) ListPortsByTask(taskID string) ([]core.Port, error) {
+func (a *App) ListPortsByTask(taskID string, page int) ([]core.Port, error) {
 	if a.store == nil {
 		return nil, fmt.Errorf("存储未初始化")
 	}
-	return a.store.ListPortsByTask(taskID, 50)
+	// 每页 50，多取 1 条供前端判断 hasMore。
+	return a.store.ListPortsByTask(taskID, 51, page*50)
 }
 
-func (a *App) ListSitesByTask(taskID string) ([]core.Site, error) {
+func (a *App) ListSitesByTask(taskID string, page int) ([]core.Site, error) {
 	if a.store == nil {
 		return nil, fmt.Errorf("存储未初始化")
 	}
-	return a.store.ListSitesByTask(taskID, 50)
+	return a.store.ListSitesByTask(taskID, 51, page*50)
 }
 
-func (a *App) ListLeaksByTask(taskID string) ([]core.Leak, error) {
+func (a *App) ListLeaksByTask(taskID string, page int) ([]core.Leak, error) {
 	if a.store == nil {
 		return nil, fmt.Errorf("存储未初始化")
 	}
-	return a.store.ListLeaksByTask(taskID, 50)
+	return a.store.ListLeaksByTask(taskID, 51, page*50)
 }
 
-func (a *App) ListDirectoriesByTask(taskID string) ([]core.DirectoryResult, error) {
+func (a *App) ListDirectoriesByTask(taskID string, page int) ([]core.DirectoryResult, error) {
 	if a.store == nil {
 		return nil, fmt.Errorf("存储未初始化")
 	}
-	return a.store.ListDirectoriesByTask(taskID, 50)
+	return a.store.ListDirectoriesByTask(taskID, 51, page*50)
 }
 
-func (a *App) ListSubdomainsByTask(taskID string) ([]core.Subdomain, error) {
+func (a *App) ListSubdomainsByTask(taskID string, page int) ([]core.Subdomain, error) {
 	if a.store == nil {
 		return nil, fmt.Errorf("存储未初始化")
 	}
-	return a.store.ListSubdomainsByTask(taskID, 50)
+	return a.store.ListSubdomainsByTask(taskID, 51, page*50)
 }
 
 // ListIPsByTask 返回任务发现的存活 IP（含无开放端口的）。
-func (a *App) ListIPsByTask(taskID string) ([]core.IP, error) {
+func (a *App) ListIPsByTask(taskID string, page int) ([]core.IP, error) {
 	if a.store == nil {
 		return nil, fmt.Errorf("存储未初始化")
 	}
-	return a.store.ListIPsByTask(taskID, 50)
+	return a.store.ListIPsByTask(taskID, 51, page*50)
 }
 
 // ---- 搜索 ----
 
-func (a *App) Search(query string) ([]core.SearchResult, error) {
+func (a *App) Search(query string, page int) ([]core.SearchResult, error) {
 	if a.store == nil {
 		return nil, fmt.Errorf("存储未初始化")
 	}
-	return a.store.Search(query, 50)
+	return a.store.Search(query, 51, page*50)
 }
 
 // ---- 配置 ----

@@ -183,7 +183,7 @@ func printSummary(store *core.Store, target string, typ core.TaskType) {
 		}
 	}
 
-	leaks, _ := store.ListLeaksByTask("", 100)
+	leaks, _ := store.ListLeaksByTask("", 100, 0)
 	if len(leaks) > 0 {
 		fmt.Printf("\n文件泄漏: %d\n", len(leaks))
 		for _, leak := range leaks {
@@ -191,7 +191,7 @@ func printSummary(store *core.Store, target string, typ core.TaskType) {
 		}
 	}
 
-	directories, _ := store.ListDirectoriesByTask("", 200)
+	directories, _ := store.ListDirectoriesByTask("", 200, 0)
 	if len(directories) > 0 {
 		fmt.Printf("\n路径发现: %d\n", len(directories))
 		for _, directory := range directories {

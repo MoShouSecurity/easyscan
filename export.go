@@ -127,37 +127,37 @@ func (a *App) loadExportData(taskID string, assetTypes []string) (exportData, er
 	for _, assetType := range assetTypes {
 		switch assetType {
 		case exportSubdomains:
-			items, err := a.store.ListSubdomainsByTask(taskID, -1)
+			items, err := a.store.ListSubdomainsByTask(taskID, -1, 0)
 			if err != nil {
 				return exportData{}, fmt.Errorf("读取子域名: %w", err)
 			}
 			data.Subdomains = &items
 		case exportIPs:
-			items, err := a.store.ListIPsByTask(taskID, -1)
+			items, err := a.store.ListIPsByTask(taskID, -1, 0)
 			if err != nil {
 				return exportData{}, fmt.Errorf("读取存活 IP: %w", err)
 			}
 			data.IPs = &items
 		case exportPorts:
-			items, err := a.store.ListPortsByTask(taskID, -1)
+			items, err := a.store.ListPortsByTask(taskID, -1, 0)
 			if err != nil {
 				return exportData{}, fmt.Errorf("读取端口: %w", err)
 			}
 			data.Ports = &items
 		case exportSites:
-			items, err := a.store.ListSitesByTask(taskID, -1)
+			items, err := a.store.ListSitesByTask(taskID, -1, 0)
 			if err != nil {
 				return exportData{}, fmt.Errorf("读取站点: %w", err)
 			}
 			data.Sites = &items
 		case exportLeaks:
-			items, err := a.store.ListLeaksByTask(taskID, -1)
+			items, err := a.store.ListLeaksByTask(taskID, -1, 0)
 			if err != nil {
 				return exportData{}, fmt.Errorf("读取泄漏结果: %w", err)
 			}
 			data.Leaks = &items
 		case exportDirectories:
-			items, err := a.store.ListDirectoriesByTask(taskID, -1)
+			items, err := a.store.ListDirectoriesByTask(taskID, -1, 0)
 			if err != nil {
 				return exportData{}, fmt.Errorf("读取目录结果: %w", err)
 			}

@@ -181,7 +181,7 @@ func TestFofaSearchProxy(t *testing.T) {
 
 	results, err := fofaSearchImpl(context.Background(), "example.com", "k", proxySrv.URL, 5*time.Second, srv.URL+"/api/v1/search/all")
 	if err != nil {
-		t.Fatalf("fofaSearch(proxy): %v", err)
+		t.Fatalf("fofaSearch(proxy, 0): %v", err)
 	}
 	if len(results) != 1 || results[0].IP != "9.9.9.9" {
 		t.Fatalf("results = %+v", results)
@@ -223,7 +223,7 @@ func TestPersistEnumerated(t *testing.T) {
 
 	// 另一任务写入同一子域名时，两份任务结果必须各自保留。
 	_ = s.UpsertSubdomain(Subdomain{ID: newID(), Domain: domain, Subdomain: "a.example.com", IP: "1.2.3.4", Source: "resolved", TaskID: "task-other", CreatedAt: nowUnix()})
-	original, err := s.ListSubdomainsByTask(taskID, 0)
+	original, err := s.ListSubdomainsByTask(taskID, 0, 0)
 	if err != nil || len(original) != 2 {
 		t.Fatalf("原任务记录 = %+v err=%v", original, err)
 	}
@@ -232,7 +232,7 @@ func TestPersistEnumerated(t *testing.T) {
 			t.Fatalf("另一任务覆盖了原任务记录: %+v", sd)
 		}
 	}
-	other, err := s.ListSubdomainsByTask("task-other", 0)
+	other, err := s.ListSubdomainsByTask("task-other", 0, 0)
 	if err != nil || len(other) != 1 || other[0].IP != "1.2.3.4" || other[0].Source != "resolved" {
 		t.Fatalf("另一任务记录 = %+v err=%v", other, err)
 	}

@@ -588,11 +588,11 @@ func (s *Store) DeleteTask(id string) error {
 	return tx.Commit()
 }
 
-func (s *Store) ListTasks(limit int) ([]Task, error) {
+func (s *Store) ListTasks(limit, offset int) ([]Task, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	rows, err := s.db.Query(`SELECT id, target, type, status, progress, message, stage, params, created_at, finished_at FROM tasks ORDER BY created_at DESC, rowid DESC LIMIT ?`, limit)
+	rows, err := s.db.Query(`SELECT id, target, type, status, progress, message, stage, params, created_at, finished_at FROM tasks ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -657,11 +657,11 @@ func (s *Store) ListSubdomains(domain string, limit int) ([]Subdomain, error) {
 	return scanSubdomains(rows)
 }
 
-func (s *Store) ListSubdomainsByTask(taskID string, limit int) ([]Subdomain, error) {
+func (s *Store) ListSubdomainsByTask(taskID string, limit, offset int) ([]Subdomain, error) {
 	if limit == 0 {
 		limit = 1000
 	}
-	rows, err := s.db.Query(`SELECT id, domain, subdomain, ip, source, task_id, created_at FROM subdomains WHERE task_id=? ORDER BY subdomain LIMIT ?`, taskID, limit)
+	rows, err := s.db.Query(`SELECT id, domain, subdomain, ip, source, task_id, created_at FROM subdomains WHERE task_id=? ORDER BY subdomain LIMIT ? OFFSET ?`, taskID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -706,11 +706,11 @@ func (s *Store) ListPorts(limit int) ([]Port, error) {
 	return scanPorts(rows)
 }
 
-func (s *Store) ListIPsByTask(taskID string, limit int) ([]IP, error) {
+func (s *Store) ListIPsByTask(taskID string, limit, offset int) ([]IP, error) {
 	if limit == 0 {
 		limit = 5000
 	}
-	rows, err := s.db.Query(`SELECT id, ip, domain, task_id, created_at FROM ips WHERE task_id=? ORDER BY ip LIMIT ?`, taskID, limit)
+	rows, err := s.db.Query(`SELECT id, ip, domain, task_id, created_at FROM ips WHERE task_id=? ORDER BY ip LIMIT ? OFFSET ?`, taskID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -726,11 +726,11 @@ func (s *Store) ListIPsByTask(taskID string, limit int) ([]IP, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) ListPortsByTask(taskID string, limit int) ([]Port, error) {
+func (s *Store) ListPortsByTask(taskID string, limit, offset int) ([]Port, error) {
 	if limit == 0 {
 		limit = 2000
 	}
-	rows, err := s.db.Query(`SELECT id, ip, port, protocol, service, product, version, banner, title, confidence, task_id, created_at FROM ports WHERE task_id=? ORDER BY ip, port LIMIT ?`, taskID, limit)
+	rows, err := s.db.Query(`SELECT id, ip, port, protocol, service, product, version, banner, title, confidence, task_id, created_at FROM ports WHERE task_id=? ORDER BY ip, port LIMIT ? OFFSET ?`, taskID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -769,11 +769,11 @@ func (s *Store) ListSites(limit int) ([]Site, error) {
 	return scanSites(rows)
 }
 
-func (s *Store) ListSitesByTask(taskID string, limit int) ([]Site, error) {
+func (s *Store) ListSitesByTask(taskID string, limit, offset int) ([]Site, error) {
 	if limit == 0 {
 		limit = 2000
 	}
-	rows, err := s.db.Query(`SELECT id, ip, port, url, title, status_code, server, fingerprint, screenshot, task_id, created_at FROM sites WHERE task_id=? ORDER BY url LIMIT ?`, taskID, limit)
+	rows, err := s.db.Query(`SELECT id, ip, port, url, title, status_code, server, fingerprint, screenshot, task_id, created_at FROM sites WHERE task_id=? ORDER BY url LIMIT ? OFFSET ?`, taskID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -793,11 +793,11 @@ func scanSites(rows *sql.Rows) ([]Site, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) ListLeaksByTask(taskID string, limit int) ([]Leak, error) {
+func (s *Store) ListLeaksByTask(taskID string, limit, offset int) ([]Leak, error) {
 	if limit == 0 {
 		limit = 2000
 	}
-	rows, err := s.db.Query(`SELECT id, task_id, url, path, type, status_code, created_at FROM leaks WHERE task_id=? ORDER BY url LIMIT ?`, taskID, limit)
+	rows, err := s.db.Query(`SELECT id, task_id, url, path, type, status_code, created_at FROM leaks WHERE task_id=? ORDER BY url LIMIT ? OFFSET ?`, taskID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -813,11 +813,11 @@ func (s *Store) ListLeaksByTask(taskID string, limit int) ([]Leak, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) ListDirectoriesByTask(taskID string, limit int) ([]DirectoryResult, error) {
+func (s *Store) ListDirectoriesByTask(taskID string, limit, offset int) ([]DirectoryResult, error) {
 	if limit == 0 {
 		limit = 5000
 	}
-	rows, err := s.db.Query(`SELECT id, task_id, url, path, kind, status_code, content_length, content_type, created_at FROM directories WHERE task_id=? ORDER BY url LIMIT ?`, taskID, limit)
+	rows, err := s.db.Query(`SELECT id, task_id, url, path, kind, status_code, content_length, content_type, created_at FROM directories WHERE task_id=? ORDER BY url LIMIT ? OFFSET ?`, taskID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -842,7 +842,7 @@ type SearchResult struct {
 }
 
 // Search 跨资产库模糊搜索域名、子域名、IP、标题、URL、指纹、泄露路径和目录路径。
-func (s *Store) Search(q string, limit int) ([]SearchResult, error) {
+func (s *Store) Search(q string, limit, offset int) ([]SearchResult, error) {
 	if limit <= 0 {
 		limit = 200
 	}
@@ -857,27 +857,27 @@ func (s *Store) Search(q string, limit int) ([]SearchResult, error) {
 		typ   string
 		build func(vals []any) (val, detail, taskID string)
 	}{
-		{`SELECT domain, source, '' FROM domains WHERE domain LIKE ? LIMIT ?`, "domain", func(v []any) (string, string, string) { return v[0].(string), "根域名", "" }},
-		{`SELECT subdomain, ip, task_id FROM subdomains WHERE subdomain LIKE ? OR ip LIKE ? LIMIT ?`, "subdomain", func(v []any) (string, string, string) { return v[0].(string), v[1].(string), v[2].(string) }},
-		{`SELECT ip, title, task_id FROM ports WHERE ip LIKE ? OR service LIKE ? OR title LIKE ? LIMIT ?`, "port", func(v []any) (string, string, string) { return v[0].(string), v[1].(string), v[2].(string) }},
-		{`SELECT url, title, task_id FROM sites WHERE url LIKE ? OR title LIKE ? OR fingerprint LIKE ? LIMIT ?`, "site", func(v []any) (string, string, string) { return v[0].(string), v[1].(string), v[2].(string) }},
-		{`SELECT url, path, task_id FROM leaks WHERE url LIKE ? OR path LIKE ? LIMIT ?`, "leak", func(v []any) (string, string, string) { return v[0].(string), v[1].(string), v[2].(string) }},
-		{`SELECT url, path, task_id FROM directories WHERE url LIKE ? OR path LIKE ? LIMIT ?`, "directory", func(v []any) (string, string, string) { return v[0].(string), v[1].(string), v[2].(string) }},
+		{`SELECT domain, source, '' FROM domains WHERE domain LIKE ? LIMIT ? OFFSET ?`, "domain", func(v []any) (string, string, string) { return v[0].(string), "根域名", "" }},
+		{`SELECT subdomain, ip, task_id FROM subdomains WHERE subdomain LIKE ? OR ip LIKE ? LIMIT ? OFFSET ?`, "subdomain", func(v []any) (string, string, string) { return v[0].(string), v[1].(string), v[2].(string) }},
+		{`SELECT ip, title, task_id FROM ports WHERE ip LIKE ? OR service LIKE ? OR title LIKE ? LIMIT ? OFFSET ?`, "port", func(v []any) (string, string, string) { return v[0].(string), v[1].(string), v[2].(string) }},
+		{`SELECT url, title, task_id FROM sites WHERE url LIKE ? OR title LIKE ? OR fingerprint LIKE ? LIMIT ? OFFSET ?`, "site", func(v []any) (string, string, string) { return v[0].(string), v[1].(string), v[2].(string) }},
+		{`SELECT url, path, task_id FROM leaks WHERE url LIKE ? OR path LIKE ? LIMIT ? OFFSET ?`, "leak", func(v []any) (string, string, string) { return v[0].(string), v[1].(string), v[2].(string) }},
+		{`SELECT url, path, task_id FROM directories WHERE url LIKE ? OR path LIKE ? LIMIT ? OFFSET ?`, "directory", func(v []any) (string, string, string) { return v[0].(string), v[1].(string), v[2].(string) }},
 	}
 
 	for _, qq := range queries {
 		var args []any
 		switch qq.typ {
 		case "domain":
-			args = []any{like, limit}
+			args = []any{like, limit, offset}
 		case "subdomain":
-			args = []any{like, like, limit}
+			args = []any{like, like, limit, offset}
 		case "port":
-			args = []any{like, like, like, limit}
+			args = []any{like, like, like, limit, offset}
 		case "site":
-			args = []any{like, like, like, limit}
+			args = []any{like, like, like, limit, offset}
 		case "leak", "directory":
-			args = []any{like, like, limit}
+			args = []any{like, like, limit, offset}
 		}
 		rows, err := s.db.Query(qq.sql, args...)
 		if err != nil {

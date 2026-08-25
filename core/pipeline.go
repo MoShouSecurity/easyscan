@@ -215,7 +215,7 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, s
 			return err
 		}
 	} else {
-		sites, err = e.store.ListSitesByTask(taskID, -1)
+		sites, err = e.store.ListSitesByTask(taskID, -1, 0)
 		if err != nil {
 			return fmt.Errorf("恢复任务站点: %w", err)
 		}
@@ -242,7 +242,7 @@ func (e *Engine) ScanDomain(ctx context.Context, domain string, taskID string, s
 // 此时回退到该根域名的最新全局记录，保证升级后的旧任务仍可恢复。
 func (e *Engine) taskSubdomains(taskID, domain string) ([]Subdomain, error) {
 	if taskID != "" {
-		saved, err := e.store.ListSubdomainsByTask(taskID, -1)
+		saved, err := e.store.ListSubdomainsByTask(taskID, -1, 0)
 		if err != nil {
 			return nil, fmt.Errorf("恢复任务子域名: %w", err)
 		}
@@ -282,7 +282,7 @@ func (e *Engine) ScanIPs(ctx context.Context, target string, taskID string, star
 			return err
 		}
 	} else {
-		sites, err = e.store.ListSitesByTask(taskID, -1)
+		sites, err = e.store.ListSitesByTask(taskID, -1, 0)
 		if err != nil {
 			return fmt.Errorf("恢复任务站点: %w", err)
 		}
@@ -312,7 +312,7 @@ func (e *Engine) scanPortsAndSites(ctx context.Context, ips []string, nmapTarget
 	// 合并任务已有站点（如 FOFA 端口线索在枚举阶段直接探测入库的），
 	// 保证它们进入后续泄漏/POC/截图等附加流程。
 	if taskID != "" {
-		saved, err := e.store.ListSitesByTask(taskID, -1)
+		saved, err := e.store.ListSitesByTask(taskID, -1, 0)
 		if err != nil {
 			return nil, fmt.Errorf("读取已有站点: %w", err)
 		}

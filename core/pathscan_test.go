@@ -506,14 +506,14 @@ func TestPostProcessPersistsLeakAndDirectoryHitsIncrementally(t *testing.T) {
 	if err := engine.postProcess(context.Background(), []Site{{URL: server.URL}}, "task", func(string, string, int) {}, 90); err != nil {
 		t.Fatal(err)
 	}
-	leaks, err := store.ListLeaksByTask("task", 0)
+	leaks, err := store.ListLeaksByTask("task", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(leaks) != 1 || leaks[0].Path != "/.git/config" {
 		t.Fatalf("persisted leaks = %+v", leaks)
 	}
-	directories, err := store.ListDirectoriesByTask("task", 0)
+	directories, err := store.ListDirectoriesByTask("task", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

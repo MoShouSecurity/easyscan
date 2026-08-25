@@ -40,6 +40,10 @@
   /* 可点击 URL：统一样式（下划线 hover 提示） */
   .url-link { cursor: pointer; color: var(--accent); }
   .url-link:hover { text-decoration: underline; }
+  /* 翻页条：表格/列表上方 */
+  .pager { display: flex; align-items: center; gap: 10px; padding: 6px 4px; margin-bottom: 6px; font-size: 12px; }
+  .pager button { padding: 3px 10px; font-size: 12px; }
+  .pager button[disabled] { opacity: .4; cursor: not-allowed; }
 
   /* 表格 */
   table { width: 100%; border-collapse: collapse; }
@@ -312,12 +316,19 @@ async function renderHome() {
   setTopbar('home');
   const v = document.getElementById('view');
   let tasks;
-  try { tasks = await go.ListTasks(); } catch(e) { return; }
+  try { tasks = await go.ListTasks(homePage); } catch(e) { return; }
+  const hasMore = (tasks && tasks.length > LIST_PAGE_SIZE);
+  if (hasMore) tasks = tasks.slice(0, LIST_PAGE_SIZE);
   if (!tasks || !tasks.length) {
     v.innerHTML = '<div class="empty">暂无任务。点击右上角「添加任务」开始侦察你的第一个目标。</div>';
     return;
   }
-  v.innerHTML = `<div class="section-title">侦察任务 <span class="count">${tasks.length}</span></div>
+  const pager = `<div class="pager">` +
+    `<button class="ghost" data-pager="prev" data-pkey="__home" ${homePage<=0?'disabled':''}>上一页</button>` +
+    `<span style="color:var(--muted)">第 ${homePage+1} 页</span>` +
+    `<button class="ghost" data-pager="next" data-pkey="__home" ${hasMore?'':'disabled'}>下一页</button>` +
+    `</div>`;
+  v.innerHTML = `<div class="section-title">侦察任务 <span class="count">${tasks.length}</span></div>` + pager + `
   <div class="tbl-wrap">
   <table><thead><tr><th>目标</th><th>类型</th><th>状态</th><th style="width:180px">进度</th><th>消息</th><th>创建时间</th><th>操作</th></tr></thead><tbody>` +
   tasks.map(t => `<tr class="clickable" onclick="openDetail('${esc(t.id)}')">
@@ -334,6 +345,14 @@ async function renderHome() {
       <button class="ghost" style="padding:2px 10px;color:var(--err);font-size:12px" onclick="event.stopPropagation(); delTask('${esc(t.id)}')">删除</button>
     </td>
   </tr>`).join('') + '</tbody></table></div>';
+  // 事件委托：任务列表翻页（行内 onclick 已 stopPropagation，不冲突）。
+  v.onclick = (e) => {
+    const pg = e.target.closest('[data-pager]');
+    if (pg && !pg.disabled) {
+      homePage += (pg.dataset.pager === 'next' ? 1 : -1);
+      renderHome();
+    }
+  };
 }
 
 /* ---------- 搜索 ---------- */
@@ -345,25 +364,45 @@ async function doSearch() {
   const v = document.getElementById('view');
   v.innerHTML = '<div class="empty">搜索中…</div>';
   let results;
-  try { results = await go.Search(q); } catch(e) { results = []; }
+  try { results = await go.Search(q, searchPage); } catch(e) { results = []; }
   const typeName = { domain:'根域名', subdomain:'子域名', ip:'IP', port:'端口', site:'站点', leak:'泄露' };
   // site/leak 类型的值域是完整 URL，可点击打开浏览器（域名/IP 无 scheme 不拼凑）
   const isURLType = (t) => t === 'site' || t === 'leak';
-  v.innerHTML = `<div class="section-title">搜索 “${esc(q)}” <span class="count">${results.length} 条结果</span></div>` +
+  const more = results.length > LIST_PAGE_SIZE;
+  if (more) results = results.slice(0, LIST_PAGE_SIZE);
+  const pager = `<div class="pager">` +
+    `<button class="ghost" data-pager="prev" data-pkey="__search" ${searchPage<=0?'disabled':''}>上一页</button>` +
+    `<span style="color:var(--muted)">第 ${searchPage+1} 页</span>` +
+    `<button class="ghost" data-pager="next" data-pkey="__search" ${more?'':'disabled'}>下一页</button>` +
+    `</div>`;
+  v.innerHTML = `<div class="section-title">搜索 “${esc(q)}” <span class="count">${results.length} 条结果</span></div>` + pager +
     (results.length ? `<div class="tbl-wrap"><table><thead><tr><th>类型</th><th>值</th><th>详情</th></tr></thead><tbody>` +
     results.map(r => `<tr>
       <td><span class="badge">${typeName[r.type]||r.type}</span></td>
       <td class="${isURLType(r.type) ? 'url-link' : 'target'}">${isURLType(r.type) ? `title="点击用浏览器打开" data-url="${esc(r.value)}"` : ''}${esc(r.value)}</td>
       <td style="color:var(--muted)">${esc(r.detail)}</td>
     </tr>`).join('') + '</tbody></table></div>' : '<div class="empty">未找到匹配资产</div>');
-  // 事件委托：URL 点击打开浏览器（与详情页同模式，防内联 onclick XSS）
+  // 事件委托：URL 点击打开浏览器 + 翻页（与详情页同模式，防内联 onclick XSS）
   v.onclick = (e) => {
+    const pg = e.target.closest('[data-pager]');
+    if (pg && !pg.disabled) {
+      searchPage += (pg.dataset.pager === 'next' ? 1 : -1);
+      doSearch();
+      return;
+    }
     const el = e.target.closest('[data-url]');
     if (el) openURL(el.getAttribute('data-url'));
   };
 }
 
 /* ---------- 详情页 ---------- */
+const LIST_PAGE_SIZE = 50;
+// 各视图分页状态：详情 tab page / 首页任务 page / 搜索 page。
+let detailTabPages = {};   // tab key → page（0-based）
+let detailTabHasMore = {}; // tab key → 是否还有下一页
+let homePage = 0;
+let searchPage = 0;
+
 async function openDetail(taskID) {
   state.view = 'detail'; state.taskID = taskID; state.lastStatus = null;
   currentDetailTab = 'sites';
@@ -377,10 +416,14 @@ async function renderDetail(taskID) {
   const v = document.getElementById('view');
   // 保留表格滚动位置（运行中每 5s 重拉时避免跳动回顶部）。
   const prevScroll = document.querySelector('#detailTabContent .tbl-wrap')?.scrollTop || 0;
+  const page = (k) => detailTabPages[k] || 0;
   let task, sites, ports, leaks, directories, subs, ips;
   try {
     [task, sites, ports, leaks, directories, subs, ips] = await Promise.all([
-      go.GetTask(taskID), go.ListSitesByTask(taskID), go.ListPortsByTask(taskID), go.ListLeaksByTask(taskID), go.ListDirectoriesByTask(taskID), go.ListSubdomainsByTask(taskID), go.ListIPsByTask(taskID)
+      go.GetTask(taskID),
+      go.ListSitesByTask(taskID, page('sites')), go.ListPortsByTask(taskID, page('ports')),
+      go.ListLeaksByTask(taskID, page('leaks')), go.ListDirectoriesByTask(taskID, page('directories')),
+      go.ListSubdomainsByTask(taskID, page('subs')), go.ListIPsByTask(taskID, page('ips')),
     ]);
   } catch(e) {
     v.innerHTML = '<div class="empty">加载详情失败: ' + esc(e) + '</div>';
@@ -388,6 +431,15 @@ async function renderDetail(taskID) {
   }
   if (!task) { v.innerHTML = '<div class="empty">任务不存在或已删除</div>'; return; }
   sites = sites || []; ports = ports || []; leaks = leaks || []; directories = directories || []; subs = subs || []; ips = ips || [];
+
+  // 后端每页多取 1 条判断 hasMore；此处截断为每页条数。
+  const cut = (arr) => { const more = arr.length > LIST_PAGE_SIZE; return { data: more ? arr.slice(0, LIST_PAGE_SIZE) : arr, more }; };
+  const cSites = cut(sites), cPorts = cut(ports), cLeaks = cut(leaks),
+        cDirs = cut(directories), cSubs = cut(subs), cIPs = cut(ips);
+  sites = cSites.data; ports = cPorts.data; leaks = cLeaks.data;
+  directories = cDirs.data; subs = cSubs.data; ips = cIPs.data;
+  detailTabHasMore = { sites: cSites.more, ports: cPorts.more, leaks: cLeaks.more,
+    directories: cDirs.more, subs: cSubs.more, ips: cIPs.more };
 
   // 存活 IP 优先用落盘的 ips，兜底从端口/子域名推导（兼容旧任务）。
   const aliveIPs = ips.length
@@ -405,13 +457,14 @@ async function renderDetail(taskID) {
     directories: renderDirectoriesHTML(directories),
   };
 
+  const cnt = (n, more) => n + (more ? '+' : '');
   const tabDefs = [
-    { key: 'sites', label: '网站', count: sites.length },
-    { key: 'ips', label: 'IP存活', count: aliveIPs.length },
-    { key: 'ports', label: '端口', count: ports.length },
-    { key: 'subs', label: '子域名', count: subs.length },
-    { key: 'leaks', label: '敏感信息泄露', count: leaks.length },
-    { key: 'directories', label: '路径', count: directories.length },
+    { key: 'sites', label: '网站', count: cnt(sites.length, detailTabHasMore.sites) },
+    { key: 'ips', label: 'IP存活', count: cnt(aliveIPs.length, detailTabHasMore.ips) },
+    { key: 'ports', label: '端口', count: cnt(ports.length, detailTabHasMore.ports) },
+    { key: 'subs', label: '子域名', count: cnt(subs.length, detailTabHasMore.subs) },
+    { key: 'leaks', label: '敏感信息泄露', count: cnt(leaks.length, detailTabHasMore.leaks) },
+    { key: 'directories', label: '路径', count: cnt(directories.length, detailTabHasMore.directories) },
   ];
 
   let html = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
@@ -423,8 +476,16 @@ async function renderDetail(taskID) {
   <div id="detailTabContent"></div>`;
 
   v.innerHTML = html;
-  // 事件委托：打开站点 URL / 放大截图。避免内联 onclick 的属性→JS 上下文混淆（DOM XSS 防线）。
+  // 事件委托：打开站点 URL / 放大截图 / 翻页。避免内联 onclick 的属性→JS 上下文混淆（DOM XSS 防线）。
   v.onclick = (e) => {
+    const pg = e.target.closest('[data-pager]');
+    if (pg && !pg.disabled) {
+      const key = pg.dataset.pkey;
+      const dir = pg.dataset.pager === 'next' ? 1 : -1;
+      detailTabPages[key] = (detailTabPages[key] || 0) + dir;
+      renderDetail(state.taskID);
+      return;
+    }
     const el = e.target.closest('[data-url]');
     if (el) { openURL(el.getAttribute('data-url')); return; }
     const shot = e.target.closest('[data-shot]');
@@ -498,8 +559,17 @@ function switchDetailTab(key) {
   document.querySelectorAll('.tab[data-dtab]').forEach(t => t.classList.toggle('active', t.dataset.dtab === key));
   const content = document.getElementById('detailTabContent');
   if (!content) return;
-  // 统一包滚动容器：50 条一屏，超出出垂直滚动条
-  content.innerHTML = `<div class="tbl-wrap">${detailTabs[key] || ''}</div>`;
+  // 翻页条 + 统一滚动容器：50 条一屏，超出出垂直滚动条
+  const page = detailTabPages[key] || 0;
+  const more = detailTabHasMore[key];
+  content.innerHTML =
+    `<div class="pager">` +
+      `<button class="ghost" data-pager="prev" data-pkey="${key}" ${page<=0?'disabled':''}>上一页</button>` +
+      `<span style="color:var(--muted)">第 ${page+1} 页</span>` +
+      `<button class="ghost" data-pager="next" data-pkey="${key}" ${more?'':'disabled'}>下一页</button>` +
+      (more ? `<span style="color:var(--muted);font-size:11px">共 ${(page+1)*LIST_PAGE_SIZE}(+) 条</span>` : '') +
+    `</div>` +
+    `<div class="tbl-wrap">${detailTabs[key] || ''}</div>`;
   if (key === 'sites') currentSites.filter(s=>s.screenshot).forEach(s => loadThumb(s.id, s.screenshot));
 }
 

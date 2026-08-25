@@ -96,7 +96,7 @@ func TestScreenshotPostProcess(t *testing.T) {
 
 	engine.postProcess(context.Background(), []Site{site}, "t1", func(stage, detail string, pct int) {}, 90)
 
-	sites, _ := store.ListSitesByTask("t1", 0)
+	sites, _ := store.ListSitesByTask("t1", 0, 0)
 	if len(sites) == 0 || sites[0].Screenshot == "" {
 		t.Fatalf("截图未存入数据库: %+v", sites)
 	}

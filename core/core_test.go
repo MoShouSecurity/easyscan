@@ -247,21 +247,21 @@ func TestTaskFilterAndSearch(t *testing.T) {
 	}
 
 	// 按任务过滤。
-	portsA, _ := s.ListPortsByTask(taskA, 0)
+	portsA, _ := s.ListPortsByTask(taskA, 0, 0)
 	if len(portsA) != 1 || portsA[0].IP != "10.0.0.1" {
 		t.Fatalf("ListPortsByTask(taskA) = %+v", portsA)
 	}
-	leaksA, _ := s.ListLeaksByTask(taskA, 0)
+	leaksA, _ := s.ListLeaksByTask(taskA, 0, 0)
 	if len(leaksA) != 1 || leaksA[0].Type != "git" {
 		t.Fatalf("ListLeaksByTask(taskA) = %+v", leaksA)
 	}
-	directoriesA, _ := s.ListDirectoriesByTask(taskA, 0)
+	directoriesA, _ := s.ListDirectoriesByTask(taskA, 0, 0)
 	if len(directoriesA) != 1 || directoriesA[0].Path != "/admin" || directoriesA[0].Kind != "directory" || directoriesA[0].ContentLength != 13 {
 		t.Fatalf("ListDirectoriesByTask(taskA) = %+v", directoriesA)
 	}
 
 	// 搜索命中站点标题。
-	res, _ := s.Search("API Admin", 10)
+	res, _ := s.Search("API Admin", 10, 0)
 	found := false
 	for _, r := range res {
 		if r.Type == "site" && r.Value == "http://api.example.com/" {
@@ -271,7 +271,7 @@ func TestTaskFilterAndSearch(t *testing.T) {
 	if !found {
 		t.Fatalf("Search 未命中站点: %+v", res)
 	}
-	res, _ = s.Search("/admin", 10)
+	res, _ = s.Search("/admin", 10, 0)
 	found = false
 	for _, r := range res {
 		if r.Type == "directory" && r.Value == "http://api.example.com/admin" {
@@ -286,19 +286,19 @@ func TestTaskFilterAndSearch(t *testing.T) {
 	if err := s.DeleteTask(taskA); err != nil {
 		t.Fatalf("DeleteTask: %v", err)
 	}
-	if ports, _ := s.ListPortsByTask(taskA, 0); len(ports) != 0 {
+	if ports, _ := s.ListPortsByTask(taskA, 0, 0); len(ports) != 0 {
 		t.Fatalf("删除后端口仍存在: %+v", ports)
 	}
-	if leaks, _ := s.ListLeaksByTask(taskA, 0); len(leaks) != 0 {
+	if leaks, _ := s.ListLeaksByTask(taskA, 0, 0); len(leaks) != 0 {
 		t.Fatalf("删除后泄漏仍存在: %+v", leaks)
 	}
-	if directories, _ := s.ListDirectoriesByTask(taskA, 0); len(directories) != 0 {
+	if directories, _ := s.ListDirectoriesByTask(taskA, 0, 0); len(directories) != 0 {
 		t.Fatalf("删除后目录仍存在: %+v", directories)
 	}
-	if ips, _ := s.ListIPsByTask(taskA, 0); len(ips) != 0 {
+	if ips, _ := s.ListIPsByTask(taskA, 0, 0); len(ips) != 0 {
 		t.Fatalf("删除后存活 IP 仍存在: %+v", ips)
 	}
-	if subs, _ := s.ListSubdomainsByTask(taskA, 0); len(subs) != 0 {
+	if subs, _ := s.ListSubdomainsByTask(taskA, 0, 0); len(subs) != 0 {
 		t.Fatalf("删除后子域名仍存在: %+v", subs)
 	}
 	if _, err := s.GetTask(taskA); err == nil {
@@ -335,7 +335,7 @@ func TestTaskAssetsRemainIsolated(t *testing.T) {
 	}
 
 	for _, taskID := range []string{taskA, taskB} {
-		ports, err := s.ListPortsByTask(taskID, 0)
+		ports, err := s.ListPortsByTask(taskID, 0, 0)
 		if err != nil || len(ports) != 1 {
 			t.Fatalf("ListPortsByTask(%s) = %+v, err=%v", taskID, ports, err)
 		}
@@ -347,11 +347,11 @@ func TestTaskAssetsRemainIsolated(t *testing.T) {
 	if err := s.DeleteTask(taskB); err != nil {
 		t.Fatal(err)
 	}
-	ports, err := s.ListPortsByTask(taskA, 0)
+	ports, err := s.ListPortsByTask(taskA, 0, 0)
 	if err != nil || len(ports) != 1 {
 		t.Fatalf("deleting task B damaged task A: ports=%+v err=%v", ports, err)
 	}
-	sites, err := s.ListSitesByTask(taskA, 0)
+	sites, err := s.ListSitesByTask(taskA, 0, 0)
 	if err != nil || len(sites) != 1 {
 		t.Fatalf("deleting task B damaged task A: sites=%+v err=%v", sites, err)
 	}
@@ -388,7 +388,7 @@ func TestLegacyStoreMigratesTaskScopedAssets(t *testing.T) {
 		}
 	}
 	for _, taskID := range []string{"old-task", "new-task"} {
-		ports, err := s.ListPortsByTask(taskID, 0)
+		ports, err := s.ListPortsByTask(taskID, 0, 0)
 		if err != nil || len(ports) != 1 {
 			t.Fatalf("migrated task %s ports=%+v err=%v", taskID, ports, err)
 		}
@@ -421,7 +421,7 @@ func TestLegacyDirectoryResultsGainPathKind(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	results, err := store.ListDirectoriesByTask("task", 0)
+	results, err := store.ListDirectoriesByTask("task", 0, 0)
 	if err != nil || len(results) != 1 || results[0].Kind != "route" {
 		t.Fatalf("migrated directory results=%+v err=%v", results, err)
 	}
@@ -495,11 +495,11 @@ func TestConfirmedAliveIPIsPersistedWithoutOpenScanPort(t *testing.T) {
 		Timeout:     100 * time.Millisecond,
 	})
 	engine.scanPortsAndSites(context.Background(), []string{"127.0.0.1"}, nil, nil, "alive-task", func(string, string, int) {}, 0, 90)
-	ips, err := s.ListIPsByTask("alive-task", 0)
+	ips, err := s.ListIPsByTask("alive-task", 0, 0)
 	if err != nil || len(ips) != 1 || ips[0].IP != "127.0.0.1" {
 		t.Fatalf("confirmed alive IPs=%+v err=%v; want 127.0.0.1", ips, err)
 	}
-	ports, err := s.ListPortsByTask("alive-task", 0)
+	ports, err := s.ListPortsByTask("alive-task", 0, 0)
 	if err != nil || len(ports) != 0 {
 		t.Fatalf("closed scan port unexpectedly persisted: %+v err=%v", ports, err)
 	}

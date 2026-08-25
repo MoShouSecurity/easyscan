@@ -106,11 +106,19 @@ func (s siteScope) allowsOrigin(rawURL string) bool {
 	u, err := url.Parse(rawURL)
 	base, baseErr := url.Parse(s.baseURL)
 	return err == nil && baseErr == nil && u.User == nil && isHTTPScheme(u.Scheme) &&
-		strings.EqualFold(u.Scheme, base.Scheme) && strings.EqualFold(u.Host, base.Host)
+		strings.EqualFold(httpOrigin(u), httpOrigin(base))
 }
 
 func httpOrigin(u *url.URL) string {
-	return (&url.URL{Scheme: strings.ToLower(u.Scheme), Host: u.Host, Path: "/"}).String()
+	scheme := strings.ToLower(u.Scheme)
+	host := u.Host
+	if (scheme == "http" && u.Port() == "80") || (scheme == "https" && u.Port() == "443") {
+		host = u.Hostname()
+		if strings.Contains(host, ":") {
+			host = "[" + host + "]"
+		}
+	}
+	return (&url.URL{Scheme: scheme, Host: host, Path: "/"}).String()
 }
 
 func normalizeHTTPHost(host string) string {

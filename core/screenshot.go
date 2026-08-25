@@ -21,13 +21,23 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
+// 截图并发与等待参数：单浏览器多 tab 并发（sem 限额），
+// 静默窗口/sleep 从 800/600ms 放宽——SPA 等满 12s 上限不变，准确性与速度平衡。
+const (
+	screenshotMaxConcurrent = 3
+	screenshotQuietWindow   = 500 * time.Millisecond
+	screenshotPostSleep     = 300 * time.Millisecond
+)
+
 // Screenshotter 基于 chromedp 无头浏览器对站点首页截图，复用单一浏览器实例。
+// 并发安全：Capture 通过 sem（信号量）限流，多 tab 在共享浏览器进程内并行；
+// allowedHosts（host-resolver-rules）与 dir 全程只读，并发读安全。
 type Screenshotter struct {
 	ctx          context.Context
 	allocCancel  context.CancelFunc
 	ctxCancel    context.CancelFunc
 	dir          string
-	mu           sync.Mutex
+	sem          chan struct{}     // 并发截图配额（默认 3）
 	allowedHosts map[string]string // hostname -> 扫描阶段确认的固定 IP
 }
 
@@ -138,13 +148,20 @@ func newScreenshotterContext(parent context.Context, chromePath, dir string, all
 		allocCancel()
 		return nil, err
 	}
-	return &Screenshotter{ctx: ctx, allocCancel: allocCancel, ctxCancel: ctxCancel, dir: dir, allowedHosts: allowedHosts}, nil
+	return &Screenshotter{
+		ctx:          ctx,
+		allocCancel:  allocCancel,
+		ctxCancel:    ctxCancel,
+		dir:          dir,
+		sem:          make(chan struct{}, screenshotMaxConcurrent),
+		allowedHosts: allowedHosts,
+	}, nil
 }
 
-// Capture 对 URL 截图并保存，返回文件路径。
+// Capture 对 URL 截图并保存，返回文件路径。并发安全：sem 限流（默认 3）。
 func (s *Screenshotter) Capture(url string) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.sem <- struct{}{}
+	defer func() { <-s.sem }()
 	if len(s.allowedHosts) > 0 && !s.allows(url) {
 		return "", fmt.Errorf("拒绝截图扫描范围外地址 %q", url)
 	}
@@ -206,9 +223,9 @@ func (s *Screenshotter) Capture(url string) (string, error) {
 	actions = append(actions,
 		chromedp.Navigate(url),
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			return waitNetworkIdle(ctx, &mu, &lastActive, 12*time.Second, 800*time.Millisecond)
+			return waitNetworkIdle(ctx, &mu, &lastActive, 12*time.Second, screenshotQuietWindow)
 		}),
-		chromedp.Sleep(600*time.Millisecond),
+		chromedp.Sleep(screenshotPostSleep),
 		chromedp.CaptureScreenshot(&buf),
 	)
 

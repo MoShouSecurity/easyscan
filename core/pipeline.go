@@ -6,6 +6,8 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -651,21 +653,52 @@ func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, r
 			if err != nil {
 				return fmt.Errorf("截图器初始化失败: %w", err)
 			}
+			// 组内站点并发（Capture 内部 sem=3 限流）：单站失败仅标记不中断，
+			// 首个写库错误经 errOnce 捕获（保持"保存失败中止"语义）。
+			var wg sync.WaitGroup
+			var firstErr error
+			var errOnce sync.Once
+			var done int32
 			for _, site := range group {
-				saved := false
-				for _, u := range ScreenshotCandidates(site.URL) {
-					if path, err := shot.Capture(u); err == nil {
-						if err := e.store.SetSiteScreenshot(taskID, site.URL, path); err != nil {
-							shot.Close()
-							return fmt.Errorf("保存站点截图路径 %s: %w", site.URL, err)
+				site := site
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					defer func() {
+						if r := recover(); r != nil {
+							errOnce.Do(func() { firstErr = fmt.Errorf("截图任务异常: %v", r) })
 						}
-						saved = true
-						break
+					}()
+					saved := false
+					for _, u := range ScreenshotCandidates(site.URL) {
+						if ctx.Err() != nil {
+							return
+						}
+						if path, err := shot.Capture(u); err == nil {
+							if err := e.store.SetSiteScreenshot(taskID, site.URL, path); err != nil {
+								errOnce.Do(func() { firstErr = fmt.Errorf("保存站点截图路径 %s: %w", site.URL, err) })
+								return
+							}
+							saved = true
+							break
+						}
 					}
-				}
-				if !saved {
-					report("站点截图", fmt.Sprintf("截图失败 %s", site.URL), pct)
-				}
+					n := atomic.AddInt32(&done, 1)
+					if !saved {
+						report("站点截图", fmt.Sprintf("截图失败 %s", site.URL), pct)
+					} else {
+						report("站点截图", fmt.Sprintf("[%d/%d] 已截 %s", n, len(group), site.URL), pct)
+					}
+				}()
+			}
+			wg.Wait()
+			if ctx.Err() != nil {
+				shot.Close()
+				return ctx.Err()
+			}
+			if firstErr != nil {
+				shot.Close()
+				return firstErr
 			}
 			shot.Close()
 		}

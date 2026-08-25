@@ -86,8 +86,13 @@ func (a *App) startup(ctx context.Context) {
 	if err := store.MarkInterruptedTasks(); err != nil {
 		println("mark interrupted tasks:", err.Error())
 	}
+	// 任务级并发：默认 4（scan.max_concurrent_tasks 可配置 1-16）。
+	workers := cfg.Scan.MaxConcurrentTasks
+	if workers <= 0 {
+		workers = 4
+	}
 	a.sched = core.NewScheduler(store, cfg.ToOptions())
-	a.sched.Start(2)
+	a.sched.Start(workers)
 }
 
 func (a *App) shutdown(_ context.Context) {

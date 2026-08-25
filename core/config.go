@@ -108,12 +108,13 @@ type Config struct {
 
 // ScanConfig 扫描通用参数。
 type ScanConfig struct {
-	Concurrency     int    `yaml:"concurrency" json:"concurrency"`
-	TimeoutSec      int    `yaml:"timeout_sec" json:"timeout_sec"`
-	DefaultPortMode string `yaml:"default_port_mode" json:"default_port_mode"`
-	DefaultPortSpec string `yaml:"default_port_spec" json:"default_port_spec"` // 默认自定义端口，仅模式为 custom 时生效
-	NmapPath        string `yaml:"nmap_path" json:"nmap_path"`                 // nmap 路径，空则自动探测
-	MasscanPath     string `yaml:"masscan_path" json:"masscan_path"`           // masscan 路径，空则自动探测
+	Concurrency        int    `yaml:"concurrency" json:"concurrency"`
+	TimeoutSec         int    `yaml:"timeout_sec" json:"timeout_sec"`
+	DefaultPortMode    string `yaml:"default_port_mode" json:"default_port_mode"`
+	DefaultPortSpec    string `yaml:"default_port_spec" json:"default_port_spec"`     // 默认自定义端口，仅模式为 custom 时生效
+	NmapPath           string `yaml:"nmap_path" json:"nmap_path"`                     // nmap 路径，空则自动探测
+	MasscanPath        string `yaml:"masscan_path" json:"masscan_path"`               // masscan 路径，空则自动探测
+	MaxConcurrentTasks int    `yaml:"max_concurrent_tasks" json:"max_concurrent_tasks"` // 最大并发任务数，0 用默认 4（1-16）
 }
 
 // FileLeakConfig 文件泄漏检测配置。
@@ -157,9 +158,10 @@ type ProxyConfig struct {
 func DefaultConfig() Config {
 	return Config{
 		Scan: ScanConfig{
-			Concurrency:     100,
-			TimeoutSec:      5,
-			DefaultPortMode: "top1000",
+			Concurrency:        100,
+			TimeoutSec:         5,
+			DefaultPortMode:    "top1000",
+			MaxConcurrentTasks: 4,
 		},
 		Nuclei: NucleiConfig{
 			TemplatesRepo: "https://github.com/projectdiscovery/nuclei-templates.git",
@@ -211,6 +213,9 @@ func (c Config) Save(path string) error {
 func (c Config) Validate() error {
 	if c.Scan.Concurrency < 1 || c.Scan.Concurrency > MaxScanConcurrency {
 		return fmt.Errorf("并发度需在 1-%d 之间", MaxScanConcurrency)
+	}
+	if c.Scan.MaxConcurrentTasks < 1 || c.Scan.MaxConcurrentTasks > 16 {
+		return fmt.Errorf("最大并发任务数需在 1-16 之间")
 	}
 	if c.Scan.TimeoutSec < 1 || c.Scan.TimeoutSec > MaxScanTimeoutSec {
 		return fmt.Errorf("超时需在 1-%d 秒之间", MaxScanTimeoutSec)

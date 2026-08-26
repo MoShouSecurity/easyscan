@@ -222,14 +222,10 @@ func probeFofaSites(ctx context.Context, results []fofaResult, store *Store, tas
 				}
 				if site, ok := probeSite(ctx, r.IP, r.Port, scheme, r.Host, timeout); ok {
 					site.TaskID = taskID
-					service := "http"
-					if strings.HasPrefix(site.URL, "https://") {
-						service = "https"
-					}
 					// 先落盘端口；站点写入失败也不能丢失已经确认的 TCP 结果。
 					if err := store.UpsertPort(Port{
 						ID: newID(), IP: site.IP, Port: site.Port, Protocol: "tcp",
-						Service: service, Title: site.Title, Confidence: ConfidencePureGo,
+						Service: siteService(site), Title: site.Title, Confidence: ConfidenceHTTP,
 						TaskID: taskID, CreatedAt: site.CreatedAt,
 					}); err != nil {
 						errOnce.Do(func() { firstErr = fmt.Errorf("保存 FOFA 确认端口 %s:%d: %w", site.IP, site.Port, err) })

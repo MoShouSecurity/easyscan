@@ -521,6 +521,7 @@ func (e *Engine) processPureGoIP(ctx context.Context, ip string, ipHosts map[str
 		if site, ok := probeWebSite(ctx, ip, rec.Port, service, hostname, e.opts.Timeout); ok {
 			site.TaskID = taskID
 			rec.Title = site.Title
+			rec.Service, rec.Confidence = siteService(site), ConfidenceHTTP
 			if err := e.store.UpsertPort(rec); err != nil {
 				return len(open), fmt.Errorf("保存端口标题 %s:%d: %w", rec.IP, rec.Port, err)
 			}
@@ -928,6 +929,14 @@ func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, r
 		report("站点截图", "完成", pct)
 	}
 	return nil
+}
+
+// siteService 使用实际成功探测的协议，而非端口号推测的服务。
+func siteService(site Site) string {
+	if strings.HasPrefix(site.URL, "https://") {
+		return "https"
+	}
+	return "http"
 }
 
 // probeWebSite 判断端口是否为 Web 服务并探测指纹；非 Web 返回 ok=false。

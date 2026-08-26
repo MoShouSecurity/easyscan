@@ -6,7 +6,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -33,7 +35,11 @@ func taskPorts(t *testing.T, s *Store, taskID string) []Port {
 func TestFofaProbePersistsConfirmedPorts(t *testing.T) {
 	s := portTestStore(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("<title>Confirmed site</title>"))
+		host, _, err := net.SplitHostPort(r.Host)
+		if err != nil {
+			host = r.Host
+		}
+		_, _ = w.Write([]byte("<title>" + host + "</title>"))
 	}))
 	defer srv.Close()
 	port := serverPort(t, srv.URL)
@@ -50,8 +56,20 @@ func TestFofaProbePersistsConfirmedPorts(t *testing.T) {
 			t.Fatalf("%s: ports=%d; want 1", taskID, len(ports))
 		}
 		p := ports[0]
-		if p.Port != port || p.Protocol != "tcp" || p.Service != "http" || p.Title != "Confirmed site" || p.Confidence != ConfidencePureGo {
+		if p.Port != port || p.Protocol != "tcp" || p.Service != "http" || (p.Title != result.Host && p.Title != other.Host) || p.Confidence != ConfidenceHTTP {
 			t.Fatalf("unexpected confirmed port: %+v", p)
+		}
+		sites, err := s.ListSitesByTask(taskID, -1, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(sites) != 2 {
+			t.Fatalf("virtual hosts=%d; want 2", len(sites))
+		}
+		for _, site := range sites {
+			if (site.Title != result.Host && site.Title != other.Host) || !strings.Contains(site.URL, "://"+site.Title+":") {
+				t.Fatalf("virtual host title was mixed up: %+v", site)
+			}
 		}
 	}
 }
@@ -89,6 +107,124 @@ func TestUpsertPortPreservesEnrichment(t *testing.T) {
 	got = taskPorts(t, s, p.TaskID)[0]
 	if got.Service != "https" || got.Product != p.Product || got.Version != p.Version || got.Confidence != p.Confidence || got.Title != "new title" {
 		t.Fatalf("lower-confidence probe replaced service details: %+v", got)
+	}
+}
+
+func TestUpsertPortServiceEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name, oldService, newService, want string
+		oldConfidence, newConfidence       int
+	}{
+		{"unknown cannot replace known", "http", "unknown", "http", 70, 70},
+		{"unknown spelling is normalized", "http", " UNKNOWN ", "http", 70, 70},
+		{"high confidence unknown is still unknown", "https", "unknown", "https", 70, 95},
+		{"known replaces unknown", "unknown", "http", "http", 95, 70},
+		{"equal confidence known updates remain valid", "http", "https", "https", 80, 80},
+		{"port guess cannot replace confirmed HTTP", "http", "ssh", "http", 80, 70},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := portTestStore(t)
+			p := Port{ID: newID(), IP: "127.0.0.1", Port: 443, Protocol: "tcp", TaskID: "task", Service: tc.oldService, Confidence: tc.oldConfidence}
+			if err := s.UpsertPort(p); err != nil {
+				t.Fatal(err)
+			}
+			p.ID, p.Service, p.Confidence = newID(), tc.newService, tc.newConfidence
+			if err := s.UpsertPort(p); err != nil {
+				t.Fatal(err)
+			}
+			if got := taskPorts(t, s, "task")[0].Service; got != tc.want {
+				t.Fatalf("service = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// bannerConnection 指定 banner 探测连接；其他连接按真实 HTTP 服务处理。
+// 这样可以使用动态端口，避免测试依赖本机 80/443 等固定端口是否可用。
+func pureGoHTTPFixture(t *testing.T, bannerConnection int32, banner string) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var connections atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Connection", "close")
+		_, _ = w.Write([]byte("<title>HTTP fixture</title>"))
+	}))
+	srv.Config.ConnState = func(conn net.Conn, state http.ConnState) {
+		if state == http.StateNew && connections.Add(1) == bannerConnection {
+			_, _ = conn.Write([]byte(banner))
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return srv, &connections
+}
+
+func TestPureGoCannotDowngradeFofaHTTP(t *testing.T) {
+	s := portTestStore(t)
+	// 第一次连接为 FOFA HTTP，第二次 TCP 扫描，第三次 banner 探测返回 unknown。
+	srv, connections := pureGoHTTPFixture(t, 3, "unrecognized fixture banner\r\n")
+	port := serverPort(t, srv.URL)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := probeFofaSites(ctx, []fofaResult{{IP: "127.0.0.1", Port: port}}, s, "task", time.Second); err != nil {
+		t.Fatal(err)
+	}
+	_, err := NewEngine(s, ScanOptions{Timeout: time.Second}).processPureGoIP(ctx, "127.0.0.1", nil, "task", map[string]Site{}, func(string) error { return nil }, []int{port})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := taskPorts(t, s, "task")[0]
+	if connections.Load() < 3 || p.Service != "http" || p.Confidence != ConfidenceHTTP || p.Title != "HTTP fixture" {
+		t.Fatalf("FOFA HTTP evidence was lost: %+v (connections=%d)", p, connections.Load())
+	}
+}
+
+func TestPureGoEnrichmentWriteFailuresKeepPort(t *testing.T) {
+	for _, stage := range []string{"success", "banner", "title", "site"} {
+		t.Run(stage, func(t *testing.T) {
+			s := portTestStore(t)
+			triggers := map[string]string{
+				"banner": `CREATE TRIGGER reject_banner BEFORE UPDATE ON ports WHEN NEW.banner<>'' BEGIN SELECT RAISE(FAIL, 'fixture banner failure'); END`,
+				"title":  `CREATE TRIGGER reject_title BEFORE UPDATE ON ports WHEN NEW.title<>'' BEGIN SELECT RAISE(FAIL, 'fixture title failure'); END`,
+				"site":   `CREATE TRIGGER reject_site BEFORE INSERT ON sites BEGIN SELECT RAISE(FAIL, 'fixture site failure'); END`,
+			}
+			if trigger := triggers[stage]; trigger != "" {
+				if _, err := s.db.Exec(trigger); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// 第一次连接确认 TCP，第二次 banner 识别 http，随后正常请求标题。
+			srv, _ := pureGoHTTPFixture(t, 2, "HTTP/1.0 200 OK\r\n\r\n")
+			port := serverPort(t, srv.URL)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			n, err := NewEngine(s, ScanOptions{Timeout: time.Second}).processPureGoIP(ctx, "127.0.0.1", nil, "task", map[string]Site{}, func(string) error { return nil }, []int{port})
+			if stage == "success" && err != nil || stage != "success" && (err == nil || !strings.Contains(err.Error(), "fixture "+stage+" failure")) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			ports := taskPorts(t, s, "task")
+			if n != 1 || len(ports) != 1 || ctx.Err() != nil {
+				t.Fatalf("confirmed port not retained promptly: n=%d ports=%+v ctx=%v", n, ports, ctx.Err())
+			}
+			p := ports[0]
+			if stage == "success" || stage == "site" {
+				if p.Service != "http" || p.Confidence != ConfidenceHTTP || p.Title != "HTTP fixture" {
+					t.Fatalf("HTTP confirmation not persisted: %+v", p)
+				}
+			} else if p.Title != "" || p.Confidence != ConfidencePureGo {
+				t.Fatalf("failed update unexpectedly persisted: %+v", p)
+			}
+			sites, err := s.ListSitesByTask("task", -1, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := 0
+			if stage == "success" {
+				want = 1
+			}
+			if len(sites) != want {
+				t.Fatalf("sites=%d; want %d", len(sites), want)
+			}
+		})
 	}
 }
 

@@ -81,7 +81,7 @@ type Port struct {
 	Product    string `json:"product"` // 产品名，如 nginx / MySQL
 	Version    string `json:"version"` // 版本号，如 1.18.0 / 5.7.32
 	Banner     string `json:"banner"`
-	Title      string `json:"title"`
+	Title      string `json:"title"`      // 最近一次非空响应标题；同端口各虚拟主机的完整标题保存在 Site 中
 	Confidence int    `json:"confidence"` // 结果置信度 0-100，0 表示未标注
 	TaskID     string `json:"task_id"`
 	CreatedAt  int64  `json:"created_at"`
@@ -92,6 +92,7 @@ const (
 	ConfidenceSyn        = 95 // nmap SYN 半开扫描
 	ConfidenceNmapV      = 90 // nmap TCP connect + 版本识别
 	ConfidenceNmap       = 85 // nmap TCP connect 无版本
+	ConfidenceHTTP       = 80 // 实际 HTTP(S) 响应确认，高于端口号/基础 banner 猜测
 	ConfidencePureGo     = 70 // 纯 Go TCP connect 降级扫描
 	ConfidenceMasscanHit = 75 // masscan SYN 发现（未走服务识别）
 )

@@ -401,11 +401,14 @@ const LIST_PAGE_SIZE = 50;
 let detailTabPages = {};   // tab key → page（0-based）
 let detailTabHasMore = {}; // tab key → 是否还有下一页
 let detailRenderVersion = 0; // 只允许最后发起的详情请求更新页面
+let detailPollVersion = 0; // 轮询锁归当前请求所有，旧任务不能阻塞新任务
 let homePage = 0;
 let searchPage = 0;
 
 async function openDetail(taskID) {
   state.view = 'detail'; state.taskID = taskID; state.lastStatus = null;
+  ++detailPollVersion;
+  state.detailRendering = false;
   detailTabPages = {};
   detailTabHasMore = {};
   detailTabs = {};
@@ -544,7 +547,7 @@ function renderSubsHTML(subs) {
 function confidenceBadge(c) {
   if (!c) return '<span class="badge badge-dim">未标注</span>';
   const cls = c >= 90 ? 'badge-ok' : c >= 80 ? 'badge-warn' : 'badge-dim';
-  const label = c >= 95 ? 'SYN' : c >= 90 ? 'nmap版本' : c >= 85 ? 'nmap' : 'TCP';
+  const label = c >= 95 ? 'SYN' : c >= 90 ? 'nmap版本' : c >= 85 ? 'nmap' : c >= 80 ? 'HTTP' : 'TCP';
   return `<span class="badge ${cls}" title="扫描方式置信度">${label} ${c}%</span>`;
 }
 
@@ -857,6 +860,7 @@ async function poll() {
   if (state.detailRendering) return; // 防重入：上一次渲染未完成不叠加
   const taskID = state.taskID;
   const version = detailRenderVersion;
+  const pollVersion = ++detailPollVersion;
   state.detailRendering = true;
   try {
     const t = await go.GetTask(taskID).catch(()=>null);
@@ -873,7 +877,9 @@ async function poll() {
       // running 期间每 2 tick（约 5s）重拉一次，实时展现新入库资产。
       await renderDetail(taskID);
     }
-  } finally { state.detailRendering = false; }
+  } finally {
+    if (pollVersion === detailPollVersion) state.detailRendering = false;
+  }
 }
 
 function cancelClose() {

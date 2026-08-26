@@ -417,10 +417,11 @@ func (s *Store) UpsertPort(p Port) error {
 	defer s.mu.Unlock()
 	// 基础发现先入库、指纹稍后补全：空字段不能抹除先前的识别结果。
 	// 服务/产品/版本优先保留高置信度来源；标题、banner 接受最新的非空值。
+	// unknown 不是服务识别证据：不能覆盖已知服务，也不能阻止后续补全。
 	_, err := s.db.Exec(
 		`INSERT INTO ports(id, ip, port, protocol, service, product, version, banner, title, confidence, task_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
 		 ON CONFLICT(task_id, ip, port, protocol) DO UPDATE SET
-		 service=CASE WHEN excluded.service<>'' AND (service='' OR excluded.confidence>=confidence) THEN excluded.service ELSE service END,
+		 service=CASE WHEN LOWER(TRIM(excluded.service)) NOT IN ('','unknown') AND (LOWER(TRIM(service)) IN ('','unknown') OR excluded.confidence>=confidence) THEN excluded.service ELSE service END,
 		 product=CASE WHEN excluded.product<>'' AND (product='' OR excluded.confidence>=confidence) THEN excluded.product ELSE product END,
 		 version=CASE WHEN excluded.version<>'' AND (version='' OR excluded.confidence>=confidence) THEN excluded.version ELSE version END,
 		 banner=COALESCE(NULLIF(excluded.banner,''), banner),

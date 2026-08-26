@@ -7,8 +7,7 @@ const vm = require('node:vm');
 const {test} = require('node:test');
 
 const html = fs.readFileSync(path.join(__dirname, '../dist/index.html'), 'utf8');
-const script = html.match(/<script>([\s\S]*?)<\/script>/)[1]
-  .replace(/\nrenderHome\(\);\nsetInterval\(poll, 2500\);/, '');
+const script = html.match(/<script>([\s\S]*?)<\/script>/)[1];
 
 function fixture(overrides = {}) {
   const elements = new Map();
@@ -22,7 +21,8 @@ function fixture(overrides = {}) {
     addEventListener() {},
   };
   const calls = [];
-  const go = {GetTask: async id => ({id, target: id, status: 'running'}), ...overrides};
+  // Keep startup I/O pending and disable the timer, without rewriting application code.
+  const go = {ListTasks: () => new Promise(() => {}), GetTask: async id => ({id, target: id, status: 'running'}), ...overrides};
   for (const name of ['Sites', 'Ports', 'Leaks', 'Directories', 'Subdomains', 'IPs']) {
     const key = 'List' + name + 'ByTask';
     go[key] ||= async (task, page) => {
@@ -30,7 +30,7 @@ function fixture(overrides = {}) {
       return name === 'Ports' ? [{ip: '127.0.0.1', port: 443, protocol: 'tcp'}] : [];
     };
   }
-  const context = vm.createContext({document, window: {go: {main: {App: go}}, runtime: {EventsOn() {}}}});
+  const context = vm.createContext({document, setInterval() {}, window: {go: {main: {App: go}}, runtime: {EventsOn() {}}}});
   vm.runInContext(script, context);
   return {calls, elements, run: code => vm.runInContext(code, context)};
 }
@@ -42,6 +42,13 @@ test('opening a task resets all detail pages and displays existing ports', async
   assert.ok(f.calls.every(c => c.page === 0));
   assert.match(f.run('detailTabs.ports'), /443/);
   assert.equal(f.run('detailTabHasMore.ports'), false);
+});
+
+test('HTTP confirmation has a distinct confidence label from TCP discovery', () => {
+  const f = fixture();
+  assert.match(f.run('confidenceBadge(80)'), />HTTP 80%/);
+  assert.match(f.run('confidenceBadge(70)'), />TCP 70%/);
+  assert.match(f.run('confidenceBadge(85)'), />nmap 85%/);
 });
 
 test('refreshing the same task preserves the selected page', async () => {
@@ -118,4 +125,34 @@ test('detail response after leaving the detail view is ignored', async () => {
   resolve({id: 'task', target: 'task', status: 'running'});
   await pending;
   assert.equal(f.elements.get('view').innerHTML, 'search results');
+});
+
+test('a hanging old poll cannot block or unlock polling of a new task', {timeout: 1000}, async () => {
+  const pending = new Map();
+  const calls = [];
+  let delay = false;
+  const f = fixture({GetTask: id => {
+    calls.push(id);
+    if (delay) return new Promise(resolve => pending.set(id, resolve));
+    return Promise.resolve({id, target: id, status: 'running'});
+  }});
+  await f.run('openDetail("old-task")');
+  delay = true;
+  const oldPoll = f.run('poll()');
+  delay = false;
+  await f.run('openDetail("new-task")');
+  delay = true;
+  const newPoll = f.run('poll()');
+  assert.ok(pending.has('new-task'), 'new task polling must not wait for the old task');
+  pending.get('old-task')(null);
+  await oldPoll;
+  assert.equal(f.run('state.detailRendering'), true, 'old finally must not release the new poll lock');
+  const count = calls.length;
+  await f.run('poll()');
+  assert.equal(calls.length, count, 'new task still prevents overlapping polls');
+  delay = false;
+  pending.get('new-task')({id: 'new-task', target: 'new-task', status: 'running'});
+  await newPoll;
+  assert.equal(f.run('state.detailRendering'), false);
+  assert.equal(f.run('state.taskID'), 'new-task');
 });

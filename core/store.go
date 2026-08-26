@@ -415,10 +415,17 @@ func (s *Store) UpsertIP(ip IP) error {
 func (s *Store) UpsertPort(p Port) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// 置信度取新旧最大值：同一端口被多种方式扫描时保留更可信的结果。
+	// 基础发现先入库、指纹稍后补全：空字段不能抹除先前的识别结果。
+	// 服务/产品/版本优先保留高置信度来源；标题、banner 接受最新的非空值。
 	_, err := s.db.Exec(
 		`INSERT INTO ports(id, ip, port, protocol, service, product, version, banner, title, confidence, task_id, created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-		 ON CONFLICT(task_id, ip, port, protocol) DO UPDATE SET service=excluded.service, product=excluded.product, version=excluded.version, banner=excluded.banner, title=excluded.title, confidence=MAX(confidence, excluded.confidence)`,
+		 ON CONFLICT(task_id, ip, port, protocol) DO UPDATE SET
+		 service=CASE WHEN excluded.service<>'' AND (service='' OR excluded.confidence>=confidence) THEN excluded.service ELSE service END,
+		 product=CASE WHEN excluded.product<>'' AND (product='' OR excluded.confidence>=confidence) THEN excluded.product ELSE product END,
+		 version=CASE WHEN excluded.version<>'' AND (version='' OR excluded.confidence>=confidence) THEN excluded.version ELSE version END,
+		 banner=COALESCE(NULLIF(excluded.banner,''), banner),
+		 title=COALESCE(NULLIF(excluded.title,''), title),
+		 confidence=MAX(confidence, excluded.confidence)`,
 		p.ID, p.IP, p.Port, p.Protocol, p.Service, p.Product, p.Version, p.Banner, p.Title, p.Confidence, p.TaskID, p.CreatedAt)
 	return err
 }

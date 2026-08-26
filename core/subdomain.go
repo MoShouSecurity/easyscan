@@ -117,7 +117,7 @@ func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions, s
 	}
 
 	// 2. FOFA 站点探测与爆破并行（probe 不写 seen，无并发问题）。
-	// probe 只探测 FOFA 端口线索并入库站点，与爆破互不阻塞。
+	// probe 实际探测 FOFA 端口线索，确认后保存端口和站点，与爆破互不阻塞。
 	var probeDone chan error
 	if len(fofaResults) > 0 && store != nil {
 		probeDone = make(chan error, 1)
@@ -200,7 +200,7 @@ func enumerateSubdomains(ctx context.Context, domain string, opts ScanOptions, s
 }
 
 // probeFofaSites 并发探测 FOFA 带端口线索的站点（http/https，Host 头=子域名），
-// 命中即入库（URL 唯一去重，与端口扫描发现的站点同表同去重）。
+// 实际 HTTP(S) 探测成功才保存端口和站点，不能把未验证的搜索线索当成开放端口。
 // 限并发 20，避免大量结果时打满网络；与爆破并行调用，互不阻塞。
 func probeFofaSites(ctx context.Context, results []fofaResult, store *Store, taskID string, timeout time.Duration) error {
 	sem := make(chan struct{}, 20)
@@ -222,6 +222,19 @@ func probeFofaSites(ctx context.Context, results []fofaResult, store *Store, tas
 				}
 				if site, ok := probeSite(ctx, r.IP, r.Port, scheme, r.Host, timeout); ok {
 					site.TaskID = taskID
+					service := "http"
+					if strings.HasPrefix(site.URL, "https://") {
+						service = "https"
+					}
+					// 先落盘端口；站点写入失败也不能丢失已经确认的 TCP 结果。
+					if err := store.UpsertPort(Port{
+						ID: newID(), IP: site.IP, Port: site.Port, Protocol: "tcp",
+						Service: service, Title: site.Title, Confidence: ConfidencePureGo,
+						TaskID: taskID, CreatedAt: site.CreatedAt,
+					}); err != nil {
+						errOnce.Do(func() { firstErr = fmt.Errorf("保存 FOFA 确认端口 %s:%d: %w", site.IP, site.Port, err) })
+						return
+					}
 					if err := store.UpsertSite(site); err != nil {
 						errOnce.Do(func() { firstErr = fmt.Errorf("保存 FOFA 站点 %s: %w", site.URL, err) })
 					}

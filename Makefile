@@ -1,8 +1,13 @@
-.PHONY: test cli desktop run-cli clean
+.PHONY: test test-frontend cli desktop run-cli clean
 
 # 运行单元测试
 test:
 	go test ./...
+	$(MAKE) test-frontend
+
+# 静态前端回归测试（Node.js 18+，无需安装 npm 依赖）
+test-frontend:
+	node --test frontend/tests/*.test.cjs
 
 # 构建命令行版（纯 Go，免 CGO）
 cli:

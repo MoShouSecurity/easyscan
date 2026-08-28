@@ -492,32 +492,46 @@ func (e *Engine) processPureGoIP(ctx context.Context, ip string, ipHosts map[str
 			return 0, err
 		}
 	}
+	// 扫描已确认的端口先全部落盘，不能被后续 banner / HTTP 超时阻塞。
+	records := make([]Port, 0, len(open))
 	for _, p := range open {
-		service, banner := grabBanner(ctx, ip, p, e.opts.Timeout)
 		rec := Port{
 			ID:         newID(),
 			IP:         ip,
 			Port:       p,
 			Protocol:   "tcp",
-			Service:    service,
-			Banner:     strings.TrimSpace(banner),
 			Confidence: ConfidencePureGo,
 			TaskID:     taskID,
 			CreatedAt:  nowUnix(),
 		}
-		if site, ok := probeWebSite(ctx, ip, p, service, hostname, e.opts.Timeout); ok {
+		if err := e.store.UpsertPort(rec); err != nil {
+			return len(open), fmt.Errorf("保存端口 %s:%d: %w", rec.IP, rec.Port, err)
+		}
+		records = append(records, rec)
+	}
+	for _, rec := range records {
+		if err := ctx.Err(); err != nil {
+			return len(open), err
+		}
+		service, banner := grabBanner(ctx, ip, rec.Port, e.opts.Timeout)
+		rec.Service, rec.Banner = service, strings.TrimSpace(banner)
+		if err := e.store.UpsertPort(rec); err != nil {
+			return len(open), fmt.Errorf("保存端口指纹 %s:%d: %w", rec.IP, rec.Port, err)
+		}
+		if site, ok := probeWebSite(ctx, ip, rec.Port, service, hostname, e.opts.Timeout); ok {
 			site.TaskID = taskID
 			rec.Title = site.Title
-			siteMap[site.URL] = site
-			if err := e.store.UpsertSite(site); err != nil {
-				return 0, fmt.Errorf("保存站点 %s: %w", site.URL, err)
+			rec.Service, rec.Confidence = siteService(site), ConfidenceHTTP
+			if err := e.store.UpsertPort(rec); err != nil {
+				return len(open), fmt.Errorf("保存端口标题 %s:%d: %w", rec.IP, rec.Port, err)
 			}
-		}
-		if err := e.store.UpsertPort(rec); err != nil {
-			return 0, fmt.Errorf("保存端口 %s:%d: %w", rec.IP, rec.Port, err)
+			if err := e.store.UpsertSite(site); err != nil {
+				return len(open), fmt.Errorf("保存站点 %s: %w", site.URL, err)
+			}
+			siteMap[site.URL] = site
 		}
 	}
-	return len(open), nil
+	return len(open), ctx.Err()
 }
 
 // nmapBatchSize nmap 目标分批大小（< maxNmapArgTargets 1024，不触发 -iL）。
@@ -551,37 +565,58 @@ func mapToSites(siteMap map[string]Site) []Site {
 // postSiteConcurrency postProcess 站点级并发度（泄漏/目录模块，单站内另有 50 并发）。
 const postSiteConcurrency = 4
 
-// nmapHostConcurrency nmap 结果处理的主机级并发度：网络探测锁外并行，
-// 写库阶段持 resMu 串行化（UPSERT 全部幂等，乱序安全）。
+// nmapHostConcurrency nmap 结果的 Web 指纹补全并发度。
 const nmapHostConcurrency = 20
 
-// processNmapBatch 并发处理一批 nmap 主机结果：
-//   - 阶段1（无锁）：每主机 per-port Web 指纹探测（网络往返，最慢），暂存本地
-//   - 阶段2（持 resMu）：recordAlive + siteMap 写入 + 站点/端口落库（store 自带写锁，
-//     在 resMu 之内获取，全工程无反序加锁，无死锁）
-//
-// 首个写库错误经 errOnce 捕获后 worker 退出；ctx 取消时快速结束。
+// nmapPortRecord 将已确认的 nmap 结果转为端口记录，不进行任何网络请求。
+func nmapPortRecord(host NmapHost, p NmapPortResult, taskID string) Port {
+	confidence := ConfidenceNmap
+	if host.Syn {
+		confidence = ConfidenceSyn
+	} else if p.Product != "" || p.Version != "" {
+		confidence = ConfidenceNmapV
+	}
+	return Port{
+		ID: newID(), IP: host.IP, Port: p.Port, Protocol: p.Protocol,
+		Service: p.Service, Product: p.Product, Version: p.Version, Title: p.Title,
+		Confidence: confidence, TaskID: taskID, CreatedAt: nowUnix(),
+	}
+}
+
+// processNmapBatch 先保存本批已确认的全部端口，再并发补全 Web 指纹。
+// 即使补全被暂停或失败，已收到的扫描结果也保留。首个写入错误取消 worker
+// 和任务投递，避免 worker 全部退出后生产者永久阻塞。
 func (e *Engine) processNmapBatch(ctx context.Context, hosts []NmapHost, ipHosts map[string][]string, taskID string, siteMap map[string]Site, recordAlive func(string) error, resMu *sync.Mutex) error {
 	if len(hosts) == 0 {
 		return nil
 	}
-	type portProbe struct {
-		p    NmapPortResult
-		conf int
-		site Site
-		ok   bool
-	}
-	type hostProbe struct {
-		hostIP string
-		probes []portProbe
+	// 此阶段无网络等待；取消只中止补全，不丢弃 nmap 已返回的结果。
+	for _, h := range hosts {
+		if len(h.Ports) == 0 {
+			continue
+		}
+		if err := recordAlive(h.IP); err != nil {
+			return err
+		}
+		for _, p := range h.Ports {
+			rec := nmapPortRecord(h, p, taskID)
+			if err := e.store.UpsertPort(rec); err != nil {
+				return fmt.Errorf("保存端口 %s:%d: %w", rec.IP, rec.Port, err)
+			}
+		}
 	}
 
+	probeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	jobs := make(chan NmapHost, nmapHostConcurrency)
 	var wg sync.WaitGroup
 	var firstErr error
 	var errOnce sync.Once
 	fail := func(err error) {
-		errOnce.Do(func() { firstErr = err })
+		errOnce.Do(func() {
+			firstErr = err
+			cancel()
+		})
 	}
 
 	for i := 0; i < nmapHostConcurrency; i++ {
@@ -589,70 +624,38 @@ func (e *Engine) processNmapBatch(ctx context.Context, hosts []NmapHost, ipHosts
 		go func() {
 			defer wg.Done()
 			for h := range jobs {
-				if ctx.Err() != nil {
+				if probeCtx.Err() != nil {
 					return
 				}
-				// 阶段1：网络探测（无锁）。
 				hostname := ""
 				if ipHosts != nil {
 					if hs := ipHosts[h.IP]; len(hs) > 0 {
 						hostname = hs[0]
 					}
 				}
-				hp := hostProbe{hostIP: h.IP}
 				for _, p := range h.Ports {
-					conf := ConfidenceNmap
-					if h.Syn {
-						conf = ConfidenceSyn
-					} else if p.Product != "" || p.Version != "" {
-						conf = ConfidenceNmapV
-					}
-					pr := portProbe{p: p, conf: conf}
-					if site, ok := probeWebSite(ctx, h.IP, p.Port, p.Service, hostname, e.opts.Timeout); ok {
-						site.TaskID = taskID
-						pr.site, pr.ok = site, true
-					}
-					hp.probes = append(hp.probes, pr)
-				}
-				// 阶段2：写库（持 resMu 串行化共享状态）。
-				resMu.Lock()
-				if len(hp.probes) > 0 {
-					if err := recordAlive(hp.hostIP); err != nil {
-						resMu.Unlock()
-						fail(err)
+					if probeCtx.Err() != nil {
 						return
 					}
-				}
-				for _, pr := range hp.probes {
-					rec := Port{
-						ID:         newID(),
-						IP:         hp.hostIP,
-						Port:       pr.p.Port,
-						Protocol:   pr.p.Protocol,
-						Service:    pr.p.Service,
-						Product:    pr.p.Product,
-						Version:    pr.p.Version,
-						Title:      pr.p.Title,
-						Confidence: pr.conf,
-						TaskID:     taskID,
-						CreatedAt:  nowUnix(),
+					site, ok := probeWebSite(probeCtx, h.IP, p.Port, p.Service, hostname, e.opts.Timeout)
+					if !ok {
+						continue
 					}
-					if pr.ok {
-						rec.Title = pr.site.Title
-						siteMap[pr.site.URL] = pr.site
-						if err := e.store.UpsertSite(pr.site); err != nil {
-							resMu.Unlock()
-							fail(fmt.Errorf("保存站点 %s: %w", pr.site.URL, err))
-							return
-						}
-					}
+					site.TaskID = taskID
+					rec := nmapPortRecord(h, p, taskID)
+					rec.Title = site.Title
 					if err := e.store.UpsertPort(rec); err != nil {
-						resMu.Unlock()
-						fail(fmt.Errorf("保存端口 %s:%d: %w", rec.IP, rec.Port, err))
+						fail(fmt.Errorf("保存端口标题 %s:%d: %w", rec.IP, rec.Port, err))
 						return
 					}
+					if err := e.store.UpsertSite(site); err != nil {
+						fail(fmt.Errorf("保存站点 %s: %w", site.URL, err))
+						return
+					}
+					resMu.Lock()
+					siteMap[site.URL] = site
+					resMu.Unlock()
 				}
-				resMu.Unlock()
 			}
 		}()
 	}
@@ -660,7 +663,7 @@ sendLoop:
 	for _, h := range hosts {
 		select {
 		case jobs <- h:
-		case <-ctx.Done():
+		case <-probeCtx.Done():
 			break sendLoop
 		}
 	}
@@ -926,6 +929,14 @@ func (e *Engine) postProcess(ctx context.Context, sites []Site, taskID string, r
 		report("站点截图", "完成", pct)
 	}
 	return nil
+}
+
+// siteService 使用实际成功探测的协议，而非端口号推测的服务。
+func siteService(site Site) string {
+	if strings.HasPrefix(site.URL, "https://") {
+		return "https"
+	}
+	return "http"
 }
 
 // probeWebSite 判断端口是否为 Web 服务并探测指纹；非 Web 返回 ok=false。

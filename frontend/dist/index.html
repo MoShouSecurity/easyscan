@@ -400,11 +400,20 @@ const LIST_PAGE_SIZE = 50;
 // 各视图分页状态：详情 tab page / 首页任务 page / 搜索 page。
 let detailTabPages = {};   // tab key → page（0-based）
 let detailTabHasMore = {}; // tab key → 是否还有下一页
+let detailRenderVersion = 0; // 只允许最后发起的详情请求更新页面
+let detailPollVersion = 0; // 轮询锁归当前请求所有，旧任务不能阻塞新任务
 let homePage = 0;
 let searchPage = 0;
 
 async function openDetail(taskID) {
   state.view = 'detail'; state.taskID = taskID; state.lastStatus = null;
+  ++detailPollVersion;
+  state.detailRendering = false;
+  detailTabPages = {};
+  detailTabHasMore = {};
+  detailTabs = {};
+  currentSites = [];
+  detailTick = 0;
   currentDetailTab = 'sites';
   setTopbar('detail');
   const v = document.getElementById('view');
@@ -413,6 +422,9 @@ async function openDetail(taskID) {
 }
 
 async function renderDetail(taskID) {
+  if (state.view !== 'detail' || state.taskID !== taskID) return;
+  const version = ++detailRenderVersion;
+  const isCurrent = () => state.view === 'detail' && state.taskID === taskID && version === detailRenderVersion;
   const v = document.getElementById('view');
   // 保留表格滚动位置（运行中每 5s 重拉时避免跳动回顶部）。
   const prevScroll = document.querySelector('#detailTabContent .tbl-wrap')?.scrollTop || 0;
@@ -426,9 +438,12 @@ async function renderDetail(taskID) {
       go.ListSubdomainsByTask(taskID, page('subs')), go.ListIPsByTask(taskID, page('ips')),
     ]);
   } catch(e) {
+    if (!isCurrent()) return;
     v.innerHTML = '<div class="empty">加载详情失败: ' + esc(e) + '</div>';
     return;
   }
+  // 切换任务/翻页后的旧响应（包括错误）不能覆盖当前页面和分页状态。
+  if (!isCurrent()) return;
   if (!task) { v.innerHTML = '<div class="empty">任务不存在或已删除</div>'; return; }
   sites = sites || []; ports = ports || []; leaks = leaks || []; directories = directories || []; subs = subs || []; ips = ips || [];
 
@@ -532,7 +547,7 @@ function renderSubsHTML(subs) {
 function confidenceBadge(c) {
   if (!c) return '<span class="badge badge-dim">未标注</span>';
   const cls = c >= 90 ? 'badge-ok' : c >= 80 ? 'badge-warn' : 'badge-dim';
-  const label = c >= 95 ? 'SYN' : c >= 90 ? 'nmap版本' : c >= 85 ? 'nmap' : 'TCP';
+  const label = c >= 95 ? 'SYN' : c >= 90 ? 'nmap版本' : c >= 85 ? 'nmap' : c >= 80 ? 'HTTP' : 'TCP';
   return `<span class="badge ${cls}" title="扫描方式置信度">${label} ${c}%</span>`;
 }
 
@@ -843,22 +858,28 @@ async function poll() {
   if (state.view === 'home') { renderHome(); return; }
   if (state.view !== 'detail' || !state.taskID) return;
   if (state.detailRendering) return; // 防重入：上一次渲染未完成不叠加
-  const t = await go.GetTask(state.taskID).catch(()=>null);
-  if (!t) { renderHome(); return; } // 任务被删除则回首页
+  const taskID = state.taskID;
+  const version = detailRenderVersion;
+  const pollVersion = ++detailPollVersion;
   state.detailRendering = true;
   try {
+    const t = await go.GetTask(taskID).catch(()=>null);
+    if (state.view !== 'detail' || state.taskID !== taskID || version !== detailRenderVersion) return;
+    if (!t) { renderHome(); return; } // 任务被删除则回首页
     if (t.status !== state.lastStatus) {
       // 状态翻转（running→finished 等）：立即刷新一次，tick 归零。
       state.lastStatus = t.status;
       detailTick = 0;
-      await renderDetail(state.taskID);
+      await renderDetail(taskID);
       return;
     }
     if (t.status === 'running' && ++detailTick % 2 === 0) {
       // running 期间每 2 tick（约 5s）重拉一次，实时展现新入库资产。
-      await renderDetail(state.taskID);
+      await renderDetail(taskID);
     }
-  } finally { state.detailRendering = false; }
+  } finally {
+    if (pollVersion === detailPollVersion) state.detailRendering = false;
+  }
 }
 
 function cancelClose() {
